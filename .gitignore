@@ -21,9 +21,8 @@ SIGIR2025.zip
 TKDE_2026.pdf
 dual2fair_data_minimal.tar.gz
 processed_data.tar.gz
-external_baselines/*/
+external_baselines/
 data 2/
 
 # Keep lightweight documentation/loader files
 !data/dataset_utils.py
-!external_baselines/README.md
