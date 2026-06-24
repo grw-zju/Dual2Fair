@@ -1,0 +1,1146 @@
+import os
+import sys
+import yaml
+import torch
+import torch.nn as nn
+import numpy as np
+import random
+import time
+import json
+import math
+import copy
+from collections import defaultdict
+
+os.environ.setdefault('LOKY_MAX_CPU_COUNT', str(os.cpu_count() or 1))
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from data.dataset_utils import Dataset, load_dataset
+from models.backbone import get_backbone, NeuMF, VAECF, LightGCN
+from models.dual2fair import Dual2Fair
+from evaluation.evaluator import Evaluator
+from baseline import BASELINES, CATEGORIES, PROCESSING_TYPES
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def load_config(config_path):
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def sample_negatives(dataset, n_neg=1):
+    interactions = dataset.get_train_interactions()
+    user_ids, pos_items, neg_items = [], [], []
+    for u, i in interactions:
+        user_ids.append(u)
+        pos_items.append(i)
+        pos_set = dataset.user_items.get(u, set())
+        for _ in range(n_neg):
+            neg = np.random.randint(0, dataset.n_items)
+            while neg in pos_set:
+                neg = np.random.randint(0, dataset.n_items)
+            neg_items.append(neg)
+    return torch.LongTensor(user_ids), torch.LongTensor(pos_items), torch.LongTensor(neg_items)
+
+
+def sample_bce_negatives(dataset, n_neg=99):
+    all_items = np.arange(dataset.n_items)
+    user_ids, item_ids, labels = [], [], []
+    for u in range(dataset.n_users):
+        pos_set = dataset.user_items.get(u, set())
+        if len(pos_set) == 0:
+            continue
+        for pos_i in pos_set:
+            user_ids.append(u)
+            item_ids.append(pos_i)
+            labels.append(1.0)
+        candidate_pool = np.setdiff1d(all_items, list(pos_set))
+        if len(candidate_pool) < n_neg:
+            sampled_neg = candidate_pool
+        else:
+            sampled_neg = np.random.choice(candidate_pool, size=n_neg, replace=False)
+        for neg_i in sampled_neg:
+            user_ids.append(u)
+            item_ids.append(neg_i)
+            labels.append(0.0)
+    return torch.LongTensor(user_ids), torch.LongTensor(item_ids), torch.FloatTensor(labels)
+
+
+def get_device(gpu_id=0):
+    if gpu_id < 0:
+        return torch.device('cpu')
+    if torch.cuda.is_available():
+        return torch.device(f'cuda:{gpu_id}')
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
+def _make_evaluator(dataset, config, device, split='test'):
+    eval_config = config.get('evaluation', {})
+    evaluator = Evaluator(dataset, k=eval_config.get('top_k', 10),
+                          num_repeats=eval_config.get('num_repeats', 1),
+                          n_neg_sampled=eval_config.get('n_neg_sampled', 99),
+                          device=device, split=split,
+                          max_full_eval_scores=eval_config.get('max_full_eval_scores', 50000000))
+    evaluator.set_baseline(None,
+                           eval_config.get('baseline_duf'),
+                           eval_config.get('baseline_dif'))
+    return evaluator
+
+
+def init_backbone(backbone_name, dataset, config, device):
+    model_config = config.get('model', {})
+    backbone_config = config.get('backbone', {}).get(backbone_name, {})
+    emb_dim = model_config.get('embedding_dim', 64)
+
+    valid_keys_map = {
+        'neumf': {'mlp_layers'},
+        'vaecf': {'encoder_hidden_dims', 'decoder_hidden_dims', 'dropout', 'anneal_cap', 'total_anneal_steps'},
+        'lightgcn': {'n_layers'},
+    }
+    valid_keys = valid_keys_map.get(backbone_name, set())
+    filtered_config = {k: v for k, v in backbone_config.items() if k in valid_keys}
+
+    backbone = get_backbone(backbone_name, dataset.n_users, dataset.n_items,
+                            embedding_dim=emb_dim, **filtered_config)
+    backbone.to(device)
+
+    if backbone_name == 'lightgcn':
+        backbone.set_adj_mat(dataset.adj_mat)
+    elif backbone_name == 'vaecf':
+        backbone.set_interact_mat(dataset.interact_mat)
+
+    return backbone
+
+
+def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        return float(max(0.0, num_training_steps - current_step)) / float(max(1, num_training_steps - num_warmup_steps))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def clip_gradients(model, max_norm=1.0):
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
+
+def manual_param_step(parameters, scale):
+    with torch.no_grad():
+        for param in parameters:
+            if param.grad is not None:
+                param.add_(param.grad, alpha=scale)
+
+
+def train_epoch_bpr(backbone, dataset, optimizer, device, batch_size=4096, n_neg=1, scheduler=None, clip_norm=1.0):
+    backbone.train()
+    if hasattr(backbone, '_clear_cache'):
+        backbone._clear_cache()
+
+    user_ids, pos_items, neg_items = sample_negatives(dataset, n_neg)
+    n_samples = len(user_ids)
+    perm = torch.randperm(n_samples)
+    user_ids = user_ids[perm]
+    pos_items = pos_items[perm]
+    neg_items = neg_items[perm]
+    total_loss = 0.0
+    n_batches = 0
+
+    for bs in range(0, n_samples, batch_size):
+        be = min(bs + batch_size, n_samples)
+        u_b = user_ids[bs:be].to(device)
+        p_b = pos_items[bs:be].to(device)
+        n_b = neg_items[bs:be].to(device)
+        optimizer.zero_grad()
+        loss = backbone.bpr_loss(u_b, p_b, n_b)
+        loss.backward()
+        if clip_norm > 0:
+            clip_gradients(backbone, clip_norm)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+        total_loss += loss.item()
+        n_batches += 1
+
+    return total_loss / max(1, n_batches)
+
+
+def train_epoch_bce(backbone, dataset, optimizer, device, batch_size=65536, n_neg=99, scheduler=None, clip_norm=1.0):
+    backbone.train()
+    if hasattr(backbone, '_clear_cache'):
+        backbone._clear_cache()
+
+    user_ids, item_ids, labels = sample_bce_negatives(dataset, n_neg)
+    n_samples = len(user_ids)
+    perm = torch.randperm(n_samples)
+    user_ids = user_ids[perm]
+    item_ids = item_ids[perm]
+    labels = labels[perm]
+    total_loss = 0.0
+    n_batches = 0
+
+    for bs in range(0, n_samples, batch_size):
+        be = min(bs + batch_size, n_samples)
+        u_b = user_ids[bs:be].to(device)
+        i_b = item_ids[bs:be].to(device)
+        l_b = labels[bs:be].to(device)
+        optimizer.zero_grad()
+        loss = backbone.bce_loss(u_b, i_b, l_b)
+        loss.backward()
+        if clip_norm > 0:
+            clip_gradients(backbone, clip_norm)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+        total_loss += loss.item()
+        n_batches += 1
+
+    return total_loss / max(1, n_batches)
+
+
+def train_epoch_vaecf(backbone, dataset, optimizer, device, batch_size=512, clip_norm=1.0):
+    backbone.train()
+    if hasattr(backbone, '_clear_cache'):
+        backbone._clear_cache()
+    user_perm = np.random.permutation(dataset.n_users)
+    total_loss = 0.0
+    n_batches = 0
+    for bs in range(0, dataset.n_users, batch_size):
+        be = min(bs + batch_size, dataset.n_users)
+        batch_users = user_perm[bs:be]
+        user_rows = dataset.interact_mat[batch_users].toarray()
+        user_rows = torch.from_numpy(user_rows).float()
+        optimizer.zero_grad()
+        loss = backbone.train_batch(user_rows, device)
+        loss.backward()
+        if clip_norm > 0:
+            clip_gradients(backbone, clip_norm)
+        optimizer.step()
+        total_loss += loss.item()
+        n_batches += 1
+    return total_loss / max(1, n_batches)
+
+
+def evaluate_model(backbone, evaluator, backbone_name, eval_mode='sampled'):
+    backbone.eval()
+    if backbone_name == 'lightgcn':
+        backbone._update_cache()
+    if eval_mode == 'sampled':
+        return evaluator.sampled_evaluate(model=backbone)
+    else:
+        return evaluator.evaluate(model=backbone)
+
+
+def evaluate_embeddings_or_model(evaluator, eval_mode='sampled', model=None,
+                                 user_embeddings=None, item_embeddings=None):
+    if eval_mode == 'sampled':
+        return evaluator.sampled_evaluate(model=model,
+                                          user_embeddings=user_embeddings,
+                                          item_embeddings=item_embeddings)
+    return evaluator.evaluate(model=model,
+                              user_embeddings=user_embeddings,
+                              item_embeddings=item_embeddings)
+
+
+def compute_baseline_fair_loss(baseline_name, baseline_obj, backbone, dataset,
+                               adv_users, disadv_users, user_ids=None,
+                               pos_items=None, neg_items=None):
+    user_embs = backbone.get_user_embeddings()
+    item_embs = backbone.get_item_embeddings()
+    if baseline_name == 'dpr':
+        return baseline_obj.compute_dpr_loss(user_embs, item_embs,
+                                             dataset.item_freq, dataset.n_items)
+    if baseline_name == 'multifr':
+        item_fair = (baseline_obj.compute_exposure_fairness_loss(user_embs, item_embs,
+                                                                 dataset.item_freq, dataset.n_items)
+                     if hasattr(baseline_obj, 'compute_exposure_fairness_loss')
+                     else baseline_obj.compute_item_fairness_loss(item_embs, dataset.item_freq, dataset.n_items))
+        return baseline_obj.compute_user_fairness_loss(user_embs, adv_users, disadv_users) + item_fair
+    if baseline_name == 'fairdual':
+        if hasattr(baseline_obj, 'compute_exposure_fairness_loss'):
+            return baseline_obj.compute_exposure_fairness_loss(
+                user_embs, item_embs, dataset.item_freq, dataset.n_items)
+        return baseline_obj.compute_item_fairness_loss(item_embs, dataset.item_freq, dataset.n_items)
+    if baseline_name == 'ada2fair':
+        user_fair = baseline_obj.compute_user_fairness_loss(user_embs, adv_users, disadv_users)
+        item_fair = (baseline_obj.compute_exposure_fairness_loss(user_embs, item_embs,
+                                                                 dataset.item_freq, dataset.n_items)
+                     if hasattr(baseline_obj, 'compute_exposure_fairness_loss')
+                     else baseline_obj.compute_item_fairness_loss(item_embs, dataset.item_freq, dataset.n_items))
+        return user_fair + item_fair
+    if baseline_name == 'fair':
+        return baseline_obj.compute_online_fairness_loss(
+            user_embs, item_embs, adv_users, disadv_users, dataset.item_freq, dataset.n_items)
+    return torch.tensor(0.0, device=user_embs.device)
+
+
+def train_standard(dataset, backbone_name, config, device, eval_mode='sampled',
+                   loss_type='bce', save_path=None):
+    backbone = init_backbone(backbone_name, dataset, config, device)
+    backbone._backbone_name_hint = backbone_name
+
+    model_config = config.get('model', {})
+    lr = model_config.get('learning_rate', 0.001)
+    optimizer = torch.optim.Adam(backbone.parameters(), lr=lr,
+                                 weight_decay=model_config.get('weight_decay', 1e-5))
+
+    val_evaluator = _make_evaluator(dataset, config, device, split='val')
+    test_evaluator = _make_evaluator(dataset, config, device, split='test')
+
+    best_ndcg = 0.0
+    best_results = None
+    best_state = None
+    patience = 0
+    max_epochs = model_config.get('max_epochs', 200)
+    early_stop = model_config.get('early_stop_patience', 50)
+    batch_size = model_config.get('batch_size', 65536)
+    n_neg = model_config.get('n_neg_bce', 4) if loss_type == 'bce' else model_config.get('n_neg', 1)
+
+    warmup_ratio = model_config.get('warmup_ratio', 0.1)
+    n_train_interactions = len(dataset.get_train_interactions())
+    n_steps_per_epoch = max(1, n_train_interactions // batch_size)
+    total_steps = max_epochs * n_steps_per_epoch
+    warmup_steps = int(total_steps * warmup_ratio)
+    scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+
+    for epoch in range(max_epochs):
+        t0 = time.time()
+
+        if backbone_name == 'vaecf':
+            avg_loss = train_epoch_vaecf(backbone, dataset, optimizer, device, batch_size,
+                                         model_config.get('gradient_clip_val', 1.0))
+        elif loss_type == 'bce':
+            avg_loss = train_epoch_bce(backbone, dataset, optimizer, device, batch_size, n_neg, scheduler)
+        else:
+            avg_loss = train_epoch_bpr(backbone, dataset, optimizer, device, batch_size, n_neg, scheduler)
+
+        results = evaluate_model(backbone, val_evaluator, backbone_name, eval_mode)
+        t1 = time.time()
+        tag = 'S-NDCG' if eval_mode == 'sampled' else 'F-NDCG'
+        print(f"[Standard/{backbone_name}] Epoch {epoch+1}: loss={avg_loss:.4f}, "
+              f"{tag}={results['NDCG']:.4f}, Hit={results['Hit']:.4f}, "
+              f"DUF={results['DUF']:.6f}, DIF={results['DIF']:.6f}, "
+              f"time={t1-t0:.1f}s")
+
+        if results['NDCG'] > best_ndcg:
+            best_ndcg = results['NDCG']
+            best_results = dict(results)
+            best_state = copy.deepcopy(backbone.state_dict())
+            patience = 0
+            if save_path:
+                torch.save(backbone.state_dict(), save_path)
+        else:
+            patience += 1
+
+        if patience >= early_stop:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+    if best_state is not None:
+        backbone.load_state_dict(best_state)
+        if hasattr(backbone, '_clear_cache'):
+            backbone._clear_cache()
+    test_results = evaluate_model(backbone, test_evaluator, backbone_name, eval_mode)
+    print(f"[Standard/{backbone_name}] Best val: {best_results}")
+    print(f"[Standard/{backbone_name}] Test: {test_results}")
+    user_embs = backbone.get_user_embeddings().detach().cpu().numpy()
+    item_embs = backbone.get_item_embeddings().detach().cpu().numpy()
+    return backbone, user_embs, item_embs, best_ndcg, test_results
+
+
+def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2=0.1,
+                    eval_mode='sampled', loss_type='bpr', save_path=None):
+    backbone = init_backbone(backbone_name, dataset, config, device)
+    backbone._backbone_name_hint = backbone_name
+
+    d2f_config = dict(config.get('dual2fair', {}))
+    d2f_config['lambda1'] = lambda1
+    d2f_config['lambda2'] = lambda2
+    full_config = dict(config)
+    full_config['dual2fair'] = d2f_config
+
+    dual2fair = Dual2Fair(backbone, dataset, full_config, device)
+
+    model_config = config.get('model', {})
+    lr = model_config.get('learning_rate', 0.001)
+    optimizer = torch.optim.Adam(backbone.parameters(), lr=lr,
+                                 weight_decay=model_config.get('weight_decay', 1e-5))
+
+    val_evaluator = _make_evaluator(dataset, config, device, split='val')
+    test_evaluator = _make_evaluator(dataset, config, device, split='test')
+
+    best_ndcg = 0.0
+    best_results = None
+    best_state = None
+    patience = 0
+    max_epochs = model_config.get('max_epochs', 200)
+    early_stop = model_config.get('early_stop_patience', 50)
+    batch_size = model_config.get('batch_size', 4096)
+    n_neg = model_config.get('n_neg', 1)
+
+    bilevel_beta = d2f_config.get('bilevel_beta', 3)
+    mirror_alpha1 = d2f_config.get('mirror_alpha1', 1.0)
+    mirror_alpha2 = d2f_config.get('mirror_alpha2', 0.1)
+    clip_norm = model_config.get('gradient_clip_val', 1.0)
+    global_step = 0
+
+    for epoch in range(max_epochs):
+        backbone.train()
+        if hasattr(backbone, '_clear_cache'):
+            backbone._clear_cache()
+        t0 = time.time()
+
+        total_loss = 0.0
+        total_user_loss = 0.0
+        total_item_loss = 0.0
+        n_batches = 0
+
+        if loss_type == 'bce':
+            n_neg_bce = model_config.get('n_neg_bce', 4)
+            bce_user_ids, bce_item_ids, bce_labels = sample_bce_negatives(dataset, n_neg_bce)
+            n_bce_samples = len(bce_user_ids)
+            bce_perm = torch.randperm(n_bce_samples)
+            bce_user_ids = bce_user_ids[bce_perm]
+            bce_item_ids = bce_item_ids[bce_perm]
+            bce_labels = bce_labels[bce_perm]
+
+            for bs in range(0, n_bce_samples, batch_size):
+                be = min(bs + batch_size, n_bce_samples)
+                u_b = bce_user_ids[bs:be].to(device)
+                i_b = bce_item_ids[bs:be].to(device)
+                l_b = bce_labels[bs:be].to(device)
+
+                optimizer.zero_grad()
+                rec_loss = backbone.bce_loss(u_b, i_b, l_b)
+                rec_loss.backward()
+                if clip_norm > 0:
+                    clip_gradients(backbone, clip_norm)
+                optimizer.step()
+                if hasattr(backbone, '_clear_cache'):
+                    backbone._clear_cache()
+
+                global_step += 1
+                L_user, L_item = dual2fair.compute_fairness_losses()
+                L_fair = lambda1 * L_user + lambda2 * L_item
+                total_user_loss += L_user.item()
+                total_item_loss += L_item.item()
+
+                if global_step % bilevel_beta == 0:
+                    optimizer.zero_grad()
+                    L_fair.backward()
+                    if clip_norm > 0:
+                        clip_gradients(backbone, clip_norm)
+                    manual_param_step(backbone.parameters(), -mirror_alpha1 * lr)
+                    if hasattr(backbone, '_clear_cache'):
+                        backbone._clear_cache()
+
+                    optimizer.zero_grad()
+                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses()
+                    L_fair_2 = lambda1 * L_user_2 + lambda2 * L_item_2
+                    L_fair_2.backward()
+                    if clip_norm > 0:
+                        clip_gradients(backbone, clip_norm)
+                    manual_param_step(backbone.parameters(), mirror_alpha2 * lr)
+                    optimizer.zero_grad()
+                else:
+                    optimizer.zero_grad()
+                    L_fair.backward()
+                    if clip_norm > 0:
+                        clip_gradients(backbone, clip_norm)
+                    manual_param_step(backbone.parameters(), -lr)
+                    optimizer.zero_grad()
+
+                total_loss += rec_loss.item()
+                n_batches += 1
+        else:
+            user_ids, pos_items, neg_items = sample_negatives(dataset, n_neg)
+            n_samples = len(user_ids)
+            perm = torch.randperm(n_samples)
+            user_ids = user_ids[perm]
+            pos_items = pos_items[perm]
+            neg_items = neg_items[perm]
+
+            for bs in range(0, n_samples, batch_size):
+                be = min(bs + batch_size, n_samples)
+                u_b = user_ids[bs:be].to(device)
+                p_b = pos_items[bs:be].to(device)
+                n_b = neg_items[bs:be].to(device)
+
+                optimizer.zero_grad()
+                rec_loss = backbone.bpr_loss(u_b, p_b, n_b)
+                rec_loss.backward()
+                if clip_norm > 0:
+                    clip_gradients(backbone, clip_norm)
+                optimizer.step()
+                if hasattr(backbone, '_clear_cache'):
+                    backbone._clear_cache()
+
+                global_step += 1
+                L_user, L_item = dual2fair.compute_fairness_losses()
+                L_fair = lambda1 * L_user + lambda2 * L_item
+                total_user_loss += L_user.item()
+                total_item_loss += L_item.item()
+
+                if global_step % bilevel_beta == 0:
+                    optimizer.zero_grad()
+                    L_fair.backward()
+                    if clip_norm > 0:
+                        clip_gradients(backbone, clip_norm)
+                    manual_param_step(backbone.parameters(), -mirror_alpha1 * lr)
+                    if hasattr(backbone, '_clear_cache'):
+                        backbone._clear_cache()
+
+                    optimizer.zero_grad()
+                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses()
+                    L_fair_2 = lambda1 * L_user_2 + lambda2 * L_item_2
+                    L_fair_2.backward()
+                    if clip_norm > 0:
+                        clip_gradients(backbone, clip_norm)
+                    manual_param_step(backbone.parameters(), mirror_alpha2 * lr)
+                    optimizer.zero_grad()
+                else:
+                    optimizer.zero_grad()
+                    L_fair.backward()
+                    if clip_norm > 0:
+                        clip_gradients(backbone, clip_norm)
+                    manual_param_step(backbone.parameters(), -lr)
+                    optimizer.zero_grad()
+
+                total_loss += rec_loss.item()
+                n_batches += 1
+
+        avg_loss = total_loss / max(1, n_batches)
+        L_user_val = total_user_loss / max(1, n_batches)
+        L_item_val = total_item_loss / max(1, n_batches)
+
+        if hasattr(backbone, '_clear_cache'):
+            backbone._clear_cache()
+        backbone.eval()
+        if backbone_name == 'lightgcn':
+            backbone._update_cache()
+
+        calibrated_user_embs, item_embs = dual2fair.get_calibrated_embeddings()
+        calibrated_user_np = calibrated_user_embs.detach().cpu().numpy()
+        item_np = item_embs.detach().cpu().numpy()
+
+        if eval_mode == 'sampled':
+            results = val_evaluator.sampled_evaluate(user_embeddings=calibrated_user_np,
+                                                     item_embeddings=item_np)
+        else:
+            results = val_evaluator.evaluate(user_embeddings=calibrated_user_np,
+                                             item_embeddings=item_np)
+
+        t1 = time.time()
+        tag = 'S-NDCG' if eval_mode == 'sampled' else 'F-NDCG'
+        print(f"[Dual2Fair/{backbone_name}] Epoch {epoch+1}: loss={avg_loss:.4f}, "
+              f"L_user={L_user_val:.4f}, L_item={L_item_val:.4f}, "
+              f"{tag}={results['NDCG']:.4f}, Hit={results['Hit']:.4f}, "
+              f"DUF={results['DUF']:.6f}, DIF={results['DIF']:.6f}, "
+              f"time={t1-t0:.1f}s")
+
+        if results['NDCG'] > best_ndcg:
+            best_ndcg = results['NDCG']
+            best_results = dict(results)
+            best_state = copy.deepcopy(backbone.state_dict())
+            patience = 0
+            if save_path:
+                torch.save({'backbone': backbone.state_dict()}, save_path)
+        else:
+            patience += 1
+
+        if patience >= early_stop:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+    print(f"[Dual2Fair/{backbone_name}] Best val: {best_results}")
+    if best_state is not None:
+        backbone.load_state_dict(best_state)
+        if hasattr(backbone, '_clear_cache'):
+            backbone._clear_cache()
+    calibrated_user_embs, item_embs = dual2fair.get_calibrated_embeddings()
+    user_embs_np = calibrated_user_embs.detach().cpu().numpy()
+    item_embs_np = item_embs.detach().cpu().numpy()
+    if eval_mode == 'sampled':
+        test_results = test_evaluator.sampled_evaluate(user_embeddings=user_embs_np,
+                                                       item_embeddings=item_embs_np)
+    else:
+        test_results = test_evaluator.evaluate(user_embeddings=user_embs_np,
+                                               item_embeddings=item_embs_np)
+    print(f"[Dual2Fair/{backbone_name}] Test: {test_results}")
+    return backbone, user_embs_np, item_embs_np, best_ndcg, test_results
+
+
+def train_inprocessing_baseline(dataset, backbone_name, baseline_name, config, device,
+                                eval_mode='sampled', loss_type='bce', save_path=None):
+    backbone = init_backbone(backbone_name, dataset, config, device)
+    backbone._backbone_name_hint = backbone_name
+
+    model_config = config.get('model', {})
+    eval_config = config.get('evaluation', {})
+    baseline_config = config.get('baseline', {}).get(baseline_name, {})
+    lr = model_config.get('learning_rate', 0.001)
+    embedding_dim = model_config.get('embedding_dim', 64)
+
+    adv_users, disadv_users = dataset.get_advantaged_users(
+        eval_config.get('adv_ratio', 0.05))
+    hot_items, cold_items = dataset.get_hot_cold_items()
+
+    baseline_cls = BASELINES[baseline_name]
+
+    if baseline_name == 'hyperuof':
+        baseline_obj = baseline_cls(dataset.n_users, dataset.n_items,
+                                    embedding_dim=embedding_dim, device=device)
+        all_params = list(backbone.parameters()) + list(baseline_obj.user_emb.parameters()) + list(baseline_obj.item_emb.parameters())
+        optimizer = torch.optim.Adam(all_params, lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+    elif baseline_name == 'ada2fair':
+        baseline_obj = baseline_cls(lambda_user=baseline_config.get('lambda_user', 0.1),
+                                    lambda_item=baseline_config.get('lambda_item', 0.1),
+                                    embedding_dim=embedding_dim, device=device)
+        all_params = list(backbone.parameters()) + list(baseline_obj.weight_generator.parameters())
+        optimizer = torch.optim.Adam(all_params, lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+    elif baseline_name == 'dpr':
+        baseline_obj = baseline_cls(lambda_dpr=baseline_config.get('lambda_dpr', 0.1),
+                                    reg_s=baseline_config.get('reg_s', 1e-4),
+                                    alpha_adv=baseline_config.get('alpha_adv', 0.01),
+                                    device=device)
+        optimizer = torch.optim.Adam(backbone.parameters(), lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+    elif baseline_name == 'fairdual':
+        baseline_obj = baseline_cls(n_groups=2,
+                                    lambda_dual=baseline_config.get('lambda_dual', 0.1),
+                                    device=device)
+        all_params = list(backbone.parameters()) + [baseline_obj.shadow_prices]
+        optimizer = torch.optim.Adam(all_params, lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+    elif baseline_name == 'multifr':
+        baseline_obj = baseline_cls(lambda_user=baseline_config.get('lambda_user', 0.1),
+                                    lambda_item=baseline_config.get('lambda_item', 0.1),
+                                    device=device)
+        optimizer = torch.optim.Adam(backbone.parameters(), lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+    elif baseline_name == 'fair':
+        baseline_obj = baseline_cls(lambda_user=baseline_config.get('lambda_user', 0.1),
+                                    lambda_item=baseline_config.get('lambda_item', 0.1),
+                                    eta=baseline_config.get('eta', 0.01),
+                                    device=device)
+        optimizer = torch.optim.Adam(backbone.parameters(), lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+    else:
+        baseline_obj = baseline_cls()
+        optimizer = torch.optim.Adam(backbone.parameters(), lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+
+    val_evaluator = _make_evaluator(dataset, config, device, split='val')
+    test_evaluator = _make_evaluator(dataset, config, device, split='test')
+
+    best_ndcg = 0.0
+    best_results = None
+    best_state = None
+    patience = 0
+    max_epochs = model_config.get('max_epochs', 200)
+    early_stop = model_config.get('early_stop_patience', 50)
+    batch_size = model_config.get('batch_size', 4096)
+    n_neg = model_config.get('n_neg', 1)
+
+    for epoch in range(max_epochs):
+        backbone.train()
+        t0 = time.time()
+        if baseline_name == 'ada2fair' and hasattr(baseline_obj, 'update_fairness_weights'):
+            baseline_obj.update_fairness_weights(
+                backbone.get_user_embeddings(), backbone.get_item_embeddings(),
+                dataset.user_items, dataset.item_freq,
+                top_k=baseline_config.get('top_k', 100),
+                delta=baseline_config.get('delta', 1e-6),
+                provider_eta=baseline_config.get('provider_eta', 1.0),
+                user_eta=baseline_config.get('user_eta', 1.0),
+                user_batch_size=baseline_config.get('user_batch_size', 512))
+
+        if backbone_name == 'vaecf':
+            rec_loss_val = train_epoch_vaecf(backbone, dataset, optimizer, device, batch_size,
+                                             model_config.get('gradient_clip_val', 1.0))
+            optimizer.zero_grad()
+            if baseline_name == 'hyperuof':
+                fair_loss = baseline_obj.fair_loss(adv_users, disadv_users)
+                total = 0.1 * fair_loss
+            else:
+                fair_loss = compute_baseline_fair_loss(
+                    baseline_name, baseline_obj, backbone, dataset, adv_users, disadv_users)
+                total = fair_loss
+            total.backward()
+            if model_config.get('gradient_clip_val', 1.0) > 0:
+                clip_gradients(backbone, model_config.get('gradient_clip_val', 1.0))
+            optimizer.step()
+            rec_loss_val += float(total.detach().cpu())
+        else:
+            user_ids, pos_items, neg_items = sample_negatives(dataset, n_neg)
+            n_samples = len(user_ids)
+            perm = torch.randperm(n_samples)
+            user_ids = user_ids[perm]
+            pos_items = pos_items[perm]
+            neg_items = neg_items[perm]
+            total_loss = 0.0
+            n_batches = 0
+
+            for bs in range(0, n_samples, batch_size):
+                be = min(bs + batch_size, n_samples)
+                u_b = user_ids[bs:be].to(device)
+                p_b = pos_items[bs:be].to(device)
+                n_b = neg_items[bs:be].to(device)
+
+                optimizer.zero_grad()
+
+                if baseline_name == 'hyperuof':
+                    h_bpr = baseline_obj.bpr_loss(u_b, p_b, n_b)
+                    h_fair = baseline_obj.fair_loss(adv_users, disadv_users)
+                    total = h_bpr + 0.1 * h_fair
+                elif baseline_name == 'ada2fair':
+                    weights = baseline_obj.compute_adaptive_weights(
+                        backbone.get_user_embeddings(), backbone.get_item_embeddings(),
+                        u_b, p_b)
+                    weighted_bpr = baseline_obj.compute_weighted_bpr_loss(
+                        backbone, u_b, p_b, n_b, weights)
+                    fair_loss = compute_baseline_fair_loss(
+                        baseline_name, baseline_obj, backbone, dataset, adv_users, disadv_users)
+                    total = weighted_bpr + fair_loss
+                else:
+                    rec_loss = backbone.bpr_loss(u_b, p_b, n_b)
+                    fair_loss = compute_baseline_fair_loss(
+                        baseline_name, baseline_obj, backbone, dataset, adv_users, disadv_users)
+                    total = rec_loss + fair_loss
+
+                total.backward()
+                optimizer.step()
+                total_loss += total.item()
+                n_batches += 1
+
+            rec_loss_val = total_loss / max(1, n_batches)
+
+        if baseline_name == 'hyperuof':
+            user_eval = baseline_obj.get_user_embeddings().detach().cpu().numpy()
+            item_eval = baseline_obj.get_item_embeddings().detach().cpu().numpy()
+            results = evaluate_embeddings_or_model(
+                val_evaluator, eval_mode, user_embeddings=user_eval, item_embeddings=item_eval)
+        else:
+            results = evaluate_model(backbone, val_evaluator, backbone_name, eval_mode)
+        t1 = time.time()
+        tag = 'S-NDCG' if eval_mode == 'sampled' else 'F-NDCG'
+        print(f"[{baseline_name}/{backbone_name}] Epoch {epoch+1}: loss={rec_loss_val:.4f}, "
+              f"{tag}={results['NDCG']:.4f}, Hit={results['Hit']:.4f}, "
+              f"DUF={results['DUF']:.6f}, DIF={results['DIF']:.6f}, "
+              f"time={t1-t0:.1f}s")
+
+        if results['NDCG'] > best_ndcg:
+            best_ndcg = results['NDCG']
+            best_results = dict(results)
+            if baseline_name == 'hyperuof':
+                best_state = {
+                    'user_emb': copy.deepcopy(baseline_obj.user_emb.state_dict()),
+                    'item_emb': copy.deepcopy(baseline_obj.item_emb.state_dict()),
+                }
+            else:
+                best_state = copy.deepcopy(backbone.state_dict())
+            patience = 0
+            if save_path:
+                if baseline_name == 'hyperuof':
+                    torch.save({
+                        'user_emb': baseline_obj.user_emb.state_dict(),
+                        'item_emb': baseline_obj.item_emb.state_dict(),
+                    }, save_path)
+                else:
+                    torch.save(backbone.state_dict(), save_path)
+        else:
+            patience += 1
+
+        if patience >= early_stop:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+    if baseline_name == 'hyperuof':
+        if best_state is not None:
+            baseline_obj.user_emb.load_state_dict(best_state['user_emb'])
+            baseline_obj.item_emb.load_state_dict(best_state['item_emb'])
+        user_eval = baseline_obj.get_user_embeddings().detach().cpu().numpy()
+        item_eval = baseline_obj.get_item_embeddings().detach().cpu().numpy()
+        test_results = evaluate_embeddings_or_model(
+            test_evaluator, eval_mode, user_embeddings=user_eval, item_embeddings=item_eval)
+    else:
+        if best_state is not None:
+            backbone.load_state_dict(best_state)
+            if hasattr(backbone, '_clear_cache'):
+                backbone._clear_cache()
+        test_results = evaluate_model(backbone, test_evaluator, backbone_name, eval_mode)
+    print(f"[{baseline_name}] Best val: {best_results}")
+    print(f"[{baseline_name}] Test: {test_results}")
+    return backbone, test_results
+
+
+def train_postprocessing_baseline(dataset, backbone_name, baseline_name, config, device,
+                                  eval_mode='sampled', loss_type='bce', save_path=None):
+    backbone = init_backbone(backbone_name, dataset, config, device)
+    backbone._backbone_name_hint = backbone_name
+
+    model_config = config.get('model', {})
+    lr = model_config.get('learning_rate', 0.001)
+    optimizer = torch.optim.Adam(backbone.parameters(), lr=lr,
+                                 weight_decay=model_config.get('weight_decay', 1e-5))
+
+    val_evaluator = _make_evaluator(dataset, config, device, split='val')
+    test_evaluator = _make_evaluator(dataset, config, device, split='test')
+
+    best_ndcg = 0.0
+    best_backbone_results = None
+    best_state = None
+    patience = 0
+    max_epochs = model_config.get('max_epochs', 200)
+    early_stop = model_config.get('early_stop_patience', 50)
+    batch_size = model_config.get('batch_size', 4096)
+    n_neg = model_config.get('n_neg', 1)
+
+    for epoch in range(max_epochs):
+        backbone.train()
+        t0 = time.time()
+
+        if backbone_name == 'vaecf':
+            avg_loss = train_epoch_vaecf(backbone, dataset, optimizer, device, batch_size,
+                                         model_config.get('gradient_clip_val', 1.0))
+        else:
+            avg_loss = train_epoch_bpr(backbone, dataset, optimizer, device,
+                                       batch_size, n_neg)
+
+        results = evaluate_model(backbone, val_evaluator, backbone_name, eval_mode)
+        t1 = time.time()
+        tag = 'S-NDCG' if eval_mode == 'sampled' else 'F-NDCG'
+        print(f"[{baseline_name}-backbone/{backbone_name}] Epoch {epoch+1}: loss={avg_loss:.4f}, "
+              f"{tag}={results['NDCG']:.4f}, time={t1-t0:.1f}s")
+
+        if results['NDCG'] > best_ndcg:
+            best_ndcg = results['NDCG']
+            best_backbone_results = dict(results)
+            best_state = copy.deepcopy(backbone.state_dict())
+            patience = 0
+            if save_path:
+                torch.save(backbone.state_dict(), save_path)
+        else:
+            patience += 1
+
+        if patience >= early_stop:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+    backbone.eval()
+    if best_state is not None:
+        backbone.load_state_dict(best_state)
+        if hasattr(backbone, '_clear_cache'):
+            backbone._clear_cache()
+    if backbone_name == 'lightgcn':
+        backbone._update_cache()
+
+    user_embs = backbone.get_user_embeddings().detach().cpu().numpy()
+    item_embs = backbone.get_item_embeddings().detach().cpu().numpy()
+
+    baseline_cls = BASELINES[baseline_name]
+    eval_config = config.get('evaluation', {})
+    baseline_config = config.get('baseline', {}).get(baseline_name, {})
+    adv_users, disadv_users = dataset.get_advantaged_users(
+        eval_config.get('adv_ratio', 0.05))
+    hot_items, cold_items = dataset.get_hot_cold_items()
+    k = eval_config.get('top_k', 10)
+
+    if baseline_name == 'ufr':
+        user_groups = {}
+        for u in adv_users:
+            user_groups[u] = 'advantaged'
+        for u in disadv_users:
+            user_groups[u] = 'disadvantaged'
+        baseline_obj = baseline_cls(k=k, delta=baseline_config.get('delta', 0.05))
+        reranked = baseline_obj.rerank(
+            user_embs, item_embs, test_evaluator.test_dict,
+            dataset.user_items, user_groups, k=k, device=device)
+    elif baseline_name == 'cpfair':
+        item_groups = {}
+        for i in hot_items:
+            item_groups[i] = 'hot'
+        for i in cold_items:
+            item_groups[i] = 'cold'
+        baseline_obj = baseline_cls(alpha=baseline_config.get('alpha', 0.5),
+                                    k=k,
+                                    utility_weight=baseline_config.get('utility_weight', 0.8))
+        reranked = baseline_obj.rerank(
+            user_embs, item_embs, test_evaluator.test_dict,
+            dataset.user_items, item_groups, k=k)
+    elif baseline_name == 'fairsort':
+        baseline_obj = baseline_cls(k=k,
+                                    min_utility=baseline_config.get('min_utility', 0.8),
+                                    search_steps=baseline_config.get('search_steps', 6))
+        reranked = baseline_obj.rerank(
+            user_embs, item_embs, test_evaluator.test_dict,
+            dataset.user_items, k=k)
+    else:
+        reranked = {}
+
+    if eval_mode == 'sampled':
+        from evaluation.metrics import compute_duf, compute_uif
+        sampled_candidates = build_sampled_candidates(
+            test_evaluator.test_dict, test_evaluator.test_neg_items,
+            dataset.user_items, dataset.n_items, eval_config.get('n_neg_sampled', 99))
+        ndcg_scores_full, mean_ndcg, mean_hit = compute_sampled_metrics_from_reranked(
+            reranked, sampled_candidates, user_embs, item_embs, k)
+        dif_val = compute_sampled_dif_from_reranked_embeddings(
+            reranked, sampled_candidates, user_embs, item_embs, k)
+        duf_val = compute_duf(ndcg_scores_full)
+        final_results = {
+            'NDCG': mean_ndcg, 'Hit': mean_hit,
+            'DUF': duf_val, 'DIF': dif_val,
+            'UIF': compute_uif(ndcg_scores_full, dif_val,
+                              eval_config.get('uif_w1', 0.5),
+                              eval_config.get('uif_w2', 0.5),
+                              baseline_duf=eval_config.get('baseline_duf'),
+                              baseline_dif=eval_config.get('baseline_dif'))
+        }
+    else:
+        from evaluation.metrics import compute_duf, compute_uif
+        ndcg_scores, mean_ndcg, mean_hit = compute_ndcg_full_from_reranked(
+            reranked, test_evaluator.test_dict, k)
+        dif_val = compute_dif_from_reranked_embeddings(
+            reranked, user_embs, item_embs, test_evaluator.test_dict, dataset.user_items, k)
+        duf_val = compute_duf(ndcg_scores)
+        final_results = {
+            'NDCG': mean_ndcg, 'Hit': mean_hit,
+            'DUF': duf_val, 'DIF': dif_val,
+            'UIF': compute_uif(ndcg_scores, dif_val,
+                              eval_config.get('uif_w1', 0.5),
+                              eval_config.get('uif_w2', 0.5),
+                              baseline_duf=eval_config.get('baseline_duf'),
+                              baseline_dif=eval_config.get('baseline_dif'))
+        }
+
+    print(f"[{baseline_name}] Best val: {best_backbone_results}")
+    print(f"[{baseline_name}] Test: {final_results}")
+    return backbone, final_results
+
+
+def compute_ndcg_full_from_reranked(reranked_lists, test_dict, k=10):
+    from evaluation.metrics import ndcg_at_k, hit_ratio_at_k
+    ndcg_scores, hit_scores = {}, {}
+    for uid, test_items in test_dict.items():
+        if isinstance(test_items, (int, np.integer)):
+            test_items = {int(test_items)}
+        elif not isinstance(test_items, set):
+            test_items = set(test_items)
+        ranked = reranked_lists.get(uid, [])
+        ndcg_scores[uid] = ndcg_at_k(ranked, test_items, k)
+        hit_scores[uid] = hit_ratio_at_k(ranked, test_items, k)
+    mean_ndcg = np.mean(list(ndcg_scores.values())) if ndcg_scores else 0.0
+    mean_hit = np.mean(list(hit_scores.values())) if hit_scores else 0.0
+    return ndcg_scores, mean_ndcg, mean_hit
+
+
+def build_sampled_candidates(test_dict, test_neg_items, train_user_items, n_items, n_neg=99):
+    sampled_candidates = {}
+    all_items = np.arange(n_items)
+    for uid, test_items in test_dict.items():
+        if isinstance(test_items, (int, np.integer)):
+            pos_item = int(test_items)
+            test_items_set = {pos_item}
+        else:
+            test_items_set = set(test_items)
+            pos_item = int(next(iter(test_items_set)))
+
+        neg_items = test_neg_items.get(uid) if test_neg_items is not None else None
+        if neg_items is None:
+            blocked = set(train_user_items.get(uid, set())) | test_items_set
+            candidate_pool = np.array([item for item in all_items if item not in blocked], dtype=np.int64)
+            if len(candidate_pool) <= n_neg:
+                neg_items = candidate_pool.tolist()
+            else:
+                neg_items = np.random.choice(candidate_pool, size=n_neg, replace=False).tolist()
+
+        sampled_candidates[uid] = [pos_item] + [int(item) for item in neg_items]
+    return sampled_candidates
+
+
+def compute_sampled_metrics_from_reranked(reranked_lists, sampled_candidates,
+                                          user_embs, item_embs, k=10):
+    from sklearn.metrics import ndcg_score as sklearn_ndcg_score
+    ndcg_scores, hit_scores = {}, {}
+    item_embs_t = torch.from_numpy(item_embs).float() if isinstance(item_embs, np.ndarray) else item_embs
+    user_embs_t = torch.from_numpy(user_embs).float() if isinstance(user_embs, np.ndarray) else user_embs
+    for uid, eval_items in sampled_candidates.items():
+        if not eval_items:
+            continue
+        labels = np.zeros(len(eval_items), dtype=np.float32)
+        labels[0] = 1.0
+        eval_set = set(eval_items)
+        selected = [item for item in reranked_lists.get(uid, []) if item in eval_set]
+        with torch.no_grad():
+            model_scores = (item_embs_t[eval_items] @ user_embs_t[uid]).cpu().numpy()
+        score_by_item = {item: float(score) for item, score in zip(eval_items, model_scores)}
+        remaining = [item for item in eval_items if item not in selected]
+        remaining.sort(key=lambda item: score_by_item[item], reverse=True)
+        final_rank = selected + remaining
+        rank_pos = {item: pos for pos, item in enumerate(final_rank)}
+        scores = np.array([-rank_pos[item] for item in eval_items], dtype=np.float32)
+        ndcg_scores[uid] = sklearn_ndcg_score([labels], [scores], k=k)
+        top_k_idx = np.argsort(-scores)[:k]
+        hit_scores[uid] = 1.0 if 0 in top_k_idx else 0.0
+    mean_ndcg = np.mean(list(ndcg_scores.values())) if ndcg_scores else 0.0
+    mean_hit = np.mean(list(hit_scores.values())) if hit_scores else 0.0
+    return ndcg_scores, mean_ndcg, mean_hit
+
+
+def compute_dif_from_reranked_lists(reranked_lists, all_scores, test_dict, train_user_items, k=10):
+    from evaluation.metrics import compute_dif_from_ranked_lists
+    return compute_dif_from_ranked_lists(reranked_lists, all_scores, test_dict, train_user_items, k)
+
+
+def compute_dif_from_reranked_embeddings(reranked_lists, user_embs, item_embs, test_dict,
+                                         train_user_items, k=10):
+    epsilon = 1e-10
+    n_items = item_embs.shape[0]
+    exposure = np.zeros(n_items)
+    quality = np.zeros(n_items)
+    item_embs_t = torch.from_numpy(item_embs).float() if isinstance(item_embs, np.ndarray) else item_embs
+    user_embs_t = torch.from_numpy(user_embs).float() if isinstance(user_embs, np.ndarray) else user_embs
+
+    with torch.no_grad():
+        for uid in test_dict.keys():
+            candidate_items = list(reranked_lists.get(uid, [])[:k])
+            true_item = test_dict[uid]
+            if isinstance(true_item, (int, np.integer)):
+                candidate_items.append(int(true_item))
+            else:
+                candidate_items.extend(list(true_item))
+            candidate_items = [i for i in dict.fromkeys(candidate_items) if i < n_items]
+            if not candidate_items:
+                continue
+            scores = (item_embs_t[candidate_items] @ user_embs_t[uid]).cpu().numpy()
+            probs = 1.0 / (1.0 + np.exp(-np.clip(scores, -30, 30)))
+            for item in reranked_lists.get(uid, [])[:k]:
+                if item < n_items:
+                    exposure[item] += 1
+            for local_idx, item in enumerate(candidate_items):
+                quality[item] += probs[local_idx]
+
+    observed = quality > 0
+    if not np.any(observed):
+        return 0.0
+    eq_ratio = exposure[observed] / (quality[observed] + epsilon)
+    return np.mean((eq_ratio - eq_ratio.mean()) ** 2)
+
+
+def compute_sampled_dif_from_reranked_embeddings(reranked_lists, sampled_candidates,
+                                                 user_embs, item_embs, k=10):
+    epsilon = 1e-10
+    n_items = item_embs.shape[0]
+    exposure = np.zeros(n_items)
+    quality = np.zeros(n_items)
+    item_embs_t = torch.from_numpy(item_embs).float() if isinstance(item_embs, np.ndarray) else item_embs
+    user_embs_t = torch.from_numpy(user_embs).float() if isinstance(user_embs, np.ndarray) else user_embs
+
+    with torch.no_grad():
+        for uid, eval_items in sampled_candidates.items():
+            eval_items = [item for item in eval_items if item < n_items]
+            if not eval_items:
+                continue
+            model_scores = (item_embs_t[eval_items] @ user_embs_t[uid]).cpu().numpy()
+            eval_set = set(eval_items)
+            selected = [item for item in reranked_lists.get(uid, []) if item in eval_set]
+            score_by_item = {item: float(score) for item, score in zip(eval_items, model_scores)}
+            remaining = [item for item in eval_items if item not in selected]
+            remaining.sort(key=lambda item: score_by_item[item], reverse=True)
+            final_rank = selected + remaining
+            rank_pos = {item: pos for pos, item in enumerate(final_rank)}
+            rank_scores = np.array([-rank_pos[item] for item in eval_items], dtype=np.float32)
+            top_k_idx = np.argsort(-rank_scores)[:k]
+            probs = 1.0 / (1.0 + np.exp(-np.clip(model_scores, -30, 30)))
+            for local_idx in top_k_idx:
+                exposure[eval_items[local_idx]] += 1
+            for local_idx, item in enumerate(eval_items):
+                quality[item] += probs[local_idx]
+
+    observed = quality > 0
+    if not np.any(observed):
+        return 0.0
+    eq_ratio = exposure[observed] / (quality[observed] + epsilon)
+    return np.mean((eq_ratio - eq_ratio.mean()) ** 2)
+
+
+def train_baseline(dataset, backbone_name, baseline_name, config, device,
+                   eval_mode='sampled', loss_type='bce', save_path=None):
+    proc_type = PROCESSING_TYPES.get(baseline_name, 'in-processing')
+    if proc_type == 'post-processing':
+        return train_postprocessing_baseline(dataset, backbone_name, baseline_name,
+                                             config, device, eval_mode, loss_type, save_path)
+    else:
+        return train_inprocessing_baseline(dataset, backbone_name, baseline_name,
+                                           config, device, eval_mode, loss_type, save_path)
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='Dual2Fair: Decoupled User-Item Representation Alignment')
+    parser.add_argument('--dataset', type=str, default='movielens',
+                        choices=['movielens', 'epinions', 'gowalla'])
+    parser.add_argument('--backbone', type=str, default='lightgcn',
+                        choices=['neumf', 'vaecf', 'lightgcn'])
+    parser.add_argument('--method', type=str, default='standard',
+                        choices=['standard', 'dual2fair', 'ufr', 'hyperuof', 'dpr',
+                                 'fairdual', 'cpfair', 'multifr', 'ada2fair', 'fair', 'fairsort'])
+    parser.add_argument('--lambda1', type=float, default=0.1)
+    parser.add_argument('--lambda2', type=float, default=0.1)
+    parser.add_argument('--eval_mode', type=str, default='sampled',
+                        choices=['sampled', 'full'])
+    parser.add_argument('--loss_type', type=str, default='bpr',
+                        choices=['bce', 'bpr'])
+    parser.add_argument('--config', type=str, default='config/default.yaml')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--save_dir', type=str, default='saved_models')
+    parser.add_argument('--results_dir', type=str, default='results')
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+    config = load_config(args.config)
+    device = get_device(args.gpu)
+    print(f"Using device: {device}")
+
+    ds_config = config.get('dataset', {}).get(args.dataset, {})
+    dataset = load_dataset(args.dataset,
+                           min_ui=ds_config.get('min_user_interactions', 5),
+                           min_ii=ds_config.get('min_item_interactions', 5))
+    print(f"Dataset: {args.dataset}, Users: {dataset.n_users}, Items: {dataset.n_items}, "
+          f"Interactions: {len(dataset.interactions)}")
+
+    os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(args.results_dir, exist_ok=True)
+    save_path = os.path.join(args.save_dir,
+                             f"{args.dataset}_{args.backbone}_{args.method}.pt")
+
+    if args.method == 'standard':
+        backbone, user_embs, item_embs, ndcg, results = train_standard(
+            dataset, args.backbone, config, device, args.eval_mode, args.loss_type, save_path)
+    elif args.method == 'dual2fair':
+        backbone, user_embs, item_embs, ndcg, results = train_dual2fair(
+            dataset, args.backbone, config, device, args.lambda1, args.lambda2,
+            args.eval_mode, args.loss_type, save_path)
+    else:
+        backbone, results = train_baseline(
+            dataset, args.backbone, args.method, config, device, args.eval_mode, args.loss_type, save_path)
+
+    results_path = os.path.join(args.results_dir,
+                                f"{args.dataset}_{args.backbone}_{args.method}.json")
+    with open(results_path, 'w') as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\nFinal Results: NDCG={results.get('NDCG', 0):.4f}, "
+          f"Hit={results.get('Hit', 0):.4f}, "
+          f"DUF={results.get('DUF', 0):.6f}, DIF={results.get('DIF', 0):.6f}, "
+          f"UIF={results.get('UIF', 0):.6f}")
+    print(f"Results saved to {results_path}")
+
+
+if __name__ == '__main__':
+    main()

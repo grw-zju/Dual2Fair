@@ -1,0 +1,106 @@
+backbone:
+  lightgcn:
+    dropout: 0.0
+    n_layers: 3
+  neumf:
+    mlp_layers:
+    - 128
+    - 64
+    - 32
+    pretrain: false
+  vaecf:
+    anneal_cap: 0.2
+    decoder_hidden_dims:
+    - 200
+    dropout: 0.5
+    encoder_hidden_dims:
+    - 600
+    - 200
+    total_anneal_steps: 200000
+baseline:
+  ada2fair:
+    delta: 1.0e-06
+    lambda_item: 0.1
+    lambda_user: 0.1
+    provider_eta: 1.0
+    top_k: 100
+    user_batch_size: 512
+    user_eta: 1.0
+  cpfair:
+    alpha: 0.5
+    utility_weight: 0.8
+  dpr:
+    alpha_adv: 0.01
+    lambda_dpr: 0.1
+    reg_s: 0.0001
+  fair:
+    eta: 0.01
+    lambda_item: 0.1
+    lambda_user: 0.1
+  fairdual:
+    lambda_dual: 0.1
+  fairsort:
+    min_utility: 0.8
+    search_steps: 6
+  multifr:
+    lambda_item: 0.1
+    lambda_user: 0.1
+  ufr:
+    delta: 0.05
+dataset:
+  epinions:
+    min_item_interactions: 5
+    min_user_interactions: 5
+  gowalla:
+    min_item_interactions: 20
+    min_user_interactions: 15
+  movielens:
+    min_item_interactions: 5
+    min_user_interactions: 5
+dual2fair:
+  adv_ratio: 0.05
+  fusion_alpha: 0.5
+  l2: 500
+  max_disadv_users: 4096
+  max_ot_items: 4096
+  sinkhorn_epsilon: 0.1
+evaluation:
+  adv_ratio: 0.05
+  max_full_eval_scores: 50000000
+  n_neg_sampled: 99
+  num_repeats: 5
+  top_k: 10
+  uif_w1: 0.5
+  uif_w2: 0.5
+general:
+  gpu: 0
+  num_workers: 4
+  seed: 42
+grid_search:
+  lambda1_range:
+  - 0.01
+  - 0.05
+  - 0.1
+  - 0.5
+  - 1
+  - 10
+  lambda2_range:
+  - 0.01
+  - 0.05
+  - 0.1
+  - 0.5
+  - 1
+  - 10
+model:
+  batch_size: 4096
+  early_stop_patience: 50
+  embedding_dim: 64
+  gradient_clip_val: 1.0
+  init_method: xavier
+  learning_rate: 0.001
+  max_epochs: 200
+  n_neg: 1
+  n_neg_bce: 4
+  optimizer: adam
+  warmup_ratio: 0.1
+  weight_decay: 1.0e-05
