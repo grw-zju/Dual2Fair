@@ -28,7 +28,7 @@ z_u[i] = sum_k GammaBar_u[i,k] P[k]
 E_u_cal[i] = rho_u E_u[i] + (1-rho_u) user_projection(z_u[i])
 ```
 
-All eligible disadvantaged users are processed in deterministic chunks. Advantaged users and ineligible empty-interaction users remain unchanged by default.
+All eligible disadvantaged users are processed in deterministic chunks. Each local plan is scaled by its global source mass; this is a deterministic chunk-wise approximation with repeated prototype marginals, not an exact single global OT solve. Advantaged users and ineligible empty-interaction users remain unchanged by default. Fairness updates detach backbone representations and update the dedicated `user_projection` module.
 
 ## Item calibration
 
@@ -41,7 +41,7 @@ z_v[i] = sum_j GammaBar_v[i,j] stop_gradient(H[j])
 E_v_cal[i] = rho_v E_v[i] + (1-rho_v) item_projection(z_v[i])
 ```
 
-Every item receives an anchor-based mapping at inference. Evaluation never samples a new subset.
+Every item receives an anchor-based mapping at inference. Evaluation never samples a new subset. The trained item objective is a projection-alignment surrogate, `mean_i[1-cos(e_i, stopgrad(z_i))]`, while the Sinkhorn plan constructs the target mapping. Fairness updates detach backbone representations and update the dedicated `item_projection` module.
 
 ## Item target distributions
 
@@ -55,7 +55,7 @@ Supported modes:
 t_j = (1-gamma) merit_j / sum_l merit_l + gamma/A
 ```
 
-Merit uses training interactions and detached predictions only. Scores are normalized per user by percentile rank before aggregation. `gamma=1` exactly reproduces the uniform target. The corrected default is `merit_uniform_mixture`.
+Merit uses a deterministic, stratified subset of training users and deterministic item anchors, scored in chunks through the backbone adapter. Scores are normalized per user by percentile rank before aggregation. The sampling seed and sample sizes are configuration values. `gamma=1` exactly reproduces the uniform target. The corrected default is `merit_uniform_mixture`.
 
 ## Backbone adapter contract
 

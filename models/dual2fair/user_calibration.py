@@ -7,7 +7,7 @@ from .transport import compute_cosine_cost_matrix, dense_log_sinkhorn
 
 class UserRepresentationCalibration(nn.Module):
     def __init__(self, epsilon=0.1, fusion_alpha=0.5, rho_u=None,
-                 n_clusters=64, user_chunk_size=4096,
+                 n_clusters=64, user_chunk_size=4096, representation_dim=None,
                  random_state=42, sinkhorn_max_iter=100,
                  sinkhorn_convergence_tol=1e-3, device=None, **kwargs):
         super().__init__()
@@ -19,7 +19,10 @@ class UserRepresentationCalibration(nn.Module):
         self.sinkhorn_max_iter = int(sinkhorn_max_iter)
         self.sinkhorn_convergence_tol = float(sinkhorn_convergence_tol)
         self.device_hint = torch.device(device or 'cpu')
-        self.projection = nn.Identity()
+        self.projection = (nn.Linear(representation_dim, representation_dim, bias=False)
+                           if representation_dim is not None else nn.Identity())
+        if isinstance(self.projection, nn.Linear):
+            nn.init.eye_(self.projection.weight)
         self.adv_users = []
         self.disadv_users = []
         self.user_items_dict = {}
@@ -88,13 +91,16 @@ class UserRepresentationCalibration(nn.Module):
         for start in range(0, n_valid, self.user_chunk_size):
             end = min(start + self.user_chunk_size, n_valid)
             chunk = valid_interests[start:end]
-            source = torch.full((len(chunk),), 1.0 / len(chunk),
+            source = torch.full((len(chunk),), 1.0 / n_valid,
                                 device=item_embs.device, dtype=item_embs.dtype)
+            chunk_mass = source.sum().clamp_min(1e-12)
+            local_source = source / chunk_mass
             target = self.gmm_weights / self.gmm_weights.sum().clamp_min(1e-12)
             cost = compute_cosine_cost_matrix(chunk, self.prototypes)
-            plan = dense_log_sinkhorn(cost, source, target, self.epsilon,
-                                      self.sinkhorn_max_iter,
-                                      self.sinkhorn_convergence_tol)
+            local_plan = dense_log_sinkhorn(cost, local_source, target, self.epsilon,
+                                            self.sinkhorn_max_iter,
+                                            self.sinkhorn_convergence_tol)
+            plan = local_plan * chunk_mass
             entropy = -(plan * torch.log(plan.clamp_min(1e-12))).sum()
             losses.append((plan * cost).sum() - self.epsilon * entropy)
             plans.append(plan.detach())

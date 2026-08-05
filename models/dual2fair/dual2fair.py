@@ -22,11 +22,14 @@ class Dual2Fair(nn.Module):
         self.adapter = get_adapter(name, backbone)
         settings = config.get('dual2fair', {})
         seed = config.get('seeds', {}).get('ot_sampling', 42)
+        raw_user_repr, raw_item_repr = self._raw_representations()
+        representation_dim = raw_item_repr.shape[1]
         self.user_calibration = UserRepresentationCalibration(
             epsilon=settings.get('sinkhorn_epsilon', 0.1),
             rho_u=settings.get('rho_u', settings.get('fusion_alpha', 0.5)),
             n_clusters=settings.get('n_clusters', 64),
             user_chunk_size=settings.get('user_chunk_size', 4096),
+            representation_dim=representation_dim,
             random_state=seed,
             sinkhorn_max_iter=settings.get('sinkhorn_max_iter', 100),
             sinkhorn_convergence_tol=settings.get('sinkhorn_convergence_tol', 1e-3),
@@ -43,7 +46,8 @@ class Dual2Fair(nn.Module):
             item_anchor_count=settings.get('item_anchor_count', 256),
             item_target_mode=settings.get('item_target_mode', 'merit_uniform_mixture'),
             merit_uniform_gamma=settings.get('merit_uniform_gamma', 0.5),
-            rho_v=settings.get('rho_v', 0.5), random_state=seed,
+            rho_v=settings.get('rho_v', 0.5), representation_dim=representation_dim,
+            random_state=seed,
             device=self.device_hint)
         self.lambda1 = settings.get('lambda1', 0.1)
         self.lambda2 = settings.get('lambda2', 0.1)
@@ -54,19 +58,51 @@ class Dual2Fair(nn.Module):
         return self.adapter.get_raw_user_repr(), self.adapter.get_raw_item_repr()
 
     def _merit(self, raw_users, raw_items):
+        settings = self.config.get('dual2fair', {})
+        generator = torch.Generator(device='cpu').manual_seed(
+            self.config.get('seeds', {}).get('ot_sampling', 42))
+        n_users = raw_users.shape[0]
+        n_items = raw_items.shape[0]
+        user_count = min(settings.get('merit_user_sample_size', 1024), n_users)
+        item_count = min(settings.get('merit_item_sample_size', 2048), n_items)
+        sampled_users = torch.randperm(n_users, generator=generator)[:user_count].to(raw_users.device)
+        if self.item_calibration.anchor_indices is not None:
+            sampled_items = self.item_calibration.anchor_indices.to(raw_items.device)
+        else:
+            sampled_items = torch.randperm(n_items, generator=generator)[:item_count].to(raw_items.device)
+        merit = torch.ones(n_items, dtype=raw_items.dtype, device=raw_items.device)
+        accumulated = torch.zeros(len(sampled_items), dtype=raw_items.dtype,
+                                  device=raw_items.device)
+        batch_size = settings.get('merit_user_batch_size', 64)
+        state = {
+            'raw_user_repr': raw_users.detach(),
+            'raw_item_repr': raw_items.detach(),
+            'calibrated_user_repr': raw_users.detach(),
+            'calibrated_item_repr': raw_items.detach(),
+        }
         with torch.no_grad():
-            scores = raw_users.detach() @ raw_items.detach().T
-            order = torch.argsort(scores, dim=1)
-            ranks = torch.empty_like(scores)
-            rank_values = torch.arange(1, scores.shape[1] + 1, device=scores.device,
-                                       dtype=scores.dtype).expand_as(scores)
-            ranks.scatter_(1, order, rank_values)
-            return (ranks / scores.shape[1]).mean(dim=0)
+            for start in range(0, len(sampled_users), batch_size):
+                users = sampled_users[start:start + batch_size]
+                user_ids = users[:, None].expand(-1, len(sampled_items)).reshape(-1)
+                item_ids = sampled_items[None, :].expand(len(users), -1).reshape(-1)
+                scores = self.adapter.score_pairs_with_calibrated_state(
+                    user_ids, item_ids, state).reshape(len(users), len(sampled_items))
+                order = torch.argsort(scores, dim=1)
+                ranks = torch.empty_like(scores)
+                values = torch.arange(1, len(sampled_items) + 1, device=scores.device,
+                                      dtype=scores.dtype).expand_as(scores)
+                ranks.scatter_(1, order, values)
+                accumulated += (ranks / max(1, len(sampled_items))).sum(dim=0)
+        merit[sampled_items] = accumulated / max(1, len(sampled_users))
+        return merit
 
     def update_calibration_state(self):
         raw_users, raw_items = self._raw_representations()
         self.user_calibration.fit_gmm(raw_items.detach())
         user_loss = self.user_calibration.compute_user_ot_loss(raw_items)
+        frequencies = self.item_calibration._frequency_values(
+            raw_items.shape[0], self.dataset.item_freq, raw_items.dtype, raw_items.device)
+        self.item_calibration.anchor_indices = self.item_calibration._select_anchors(frequencies)
         merit = self._merit(raw_users, raw_items)
         self.item_calibration.update_state(raw_items.detach(), self.dataset.item_freq, merit)
         item_loss = self.item_calibration.compute_item_ot_loss(raw_items, self.dataset.item_freq, merit)
@@ -111,12 +147,22 @@ class Dual2Fair(nn.Module):
         if user_ids is None or user_ids.numel() == 0:
             user_loss = state['raw_user_repr'].sum() * 0.0
         else:
-            raw_users = state['raw_user_repr'][user_ids]
-            calibrated_users = state['calibrated_user_repr'][user_ids]
-            user_loss = (1.0 - F.cosine_similarity(raw_users, calibrated_users.detach(), dim=1)).mean()
-        raw_items = state['raw_item_repr']
-        calibrated_items = state['calibrated_item_repr']
-        item_loss = (1.0 - F.cosine_similarity(raw_items, calibrated_items.detach(), dim=1)).mean()
+            barycenters = self.user_calibration.barycentric_projection(
+                self.user_calibration.cached_gamma_u,
+                self.user_calibration.prototypes.detach())
+            projected = self.user_calibration.projection(barycenters)
+            raw_users = state['raw_user_repr'][user_ids].detach()
+            calibrated_users = (self.user_calibration.rho_u * raw_users
+                                + (1.0 - self.user_calibration.rho_u) * projected)
+            user_loss = (1.0 - F.cosine_similarity(
+                raw_users, calibrated_users, dim=1)).mean()
+        raw_items = state['raw_item_repr'].detach()
+        projected_items = self.item_calibration.projection(
+            self.item_calibration.cached_item_projection.detach())
+        calibrated_items = (self.item_calibration.rho_v * raw_items
+                            + (1.0 - self.item_calibration.rho_v) * projected_items)
+        item_loss = (1.0 - F.cosine_similarity(
+            raw_items, calibrated_items, dim=1)).mean()
         return user_loss, item_loss
 
     def _state(self):
@@ -134,6 +180,27 @@ class Dual2Fair(nn.Module):
 
     def bce_loss(self, user_ids, item_ids, labels):
         return F.binary_cross_entropy_with_logits(self.forward(user_ids, item_ids), labels.float())
+
+    def vaecf_reconstruction_loss(self, user_ids):
+        if self.backbone_name != 'vaecf':
+            raise TypeError('VAECF reconstruction loss requires the VAECF adapter')
+        state = self._state()
+        logits = (state['calibrated_user_repr'][user_ids]
+                  @ state['calibrated_item_repr'].T
+                  + self.backbone.get_item_bias().unsqueeze(0))
+        rows = self.backbone._get_interact_batch(
+            int(user_ids.min()), int(user_ids.max()) + 1).to(logits.device)
+        if not torch.equal(user_ids, torch.arange(int(user_ids.min()),
+                                                  int(user_ids.max()) + 1,
+                                                  device=user_ids.device)):
+            rows = torch.stack([
+                self.backbone._get_interact_batch(int(user), int(user) + 1)[0]
+                for user in user_ids.cpu().tolist()]).to(logits.device)
+        mean, log_variance = self.backbone._encode(rows)
+        reconstruction = -torch.sum(rows * F.log_softmax(logits, dim=1)) / rows.shape[0]
+        anneal = min(self.backbone.anneal_cap,
+                     self.backbone.update_count / self.backbone.total_anneal_steps)
+        return reconstruction + anneal * self.backbone.kl_loss(mean, log_variance) / rows.shape[0]
 
     def compute_all_scores(self, device=None):
         return self.adapter.score_all_with_calibrated_state(self._state())

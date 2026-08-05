@@ -12,7 +12,7 @@ class ItemRepresentationCalibration(nn.Module):
                  sinkhorn_max_iter=100, sinkhorn_convergence_tol=1e-3,
                  max_ot_items=4096, item_anchor_count=256,
                  item_target_mode='merit_uniform_mixture', merit_uniform_gamma=0.5,
-                 rho_v=0.5, random_state=42, device=None, **kwargs):
+                 rho_v=0.5, representation_dim=None, random_state=42, device=None, **kwargs):
         super().__init__()
         if item_target_mode not in self.VALID_TARGET_MODES:
             raise ValueError(f'Unknown item target mode: {item_target_mode}')
@@ -28,7 +28,10 @@ class ItemRepresentationCalibration(nn.Module):
         self.rho_v = float(rho_v)
         self.random_state = int(random_state)
         self.device_hint = torch.device(device or 'cpu')
-        self.projection = nn.Identity()
+        self.projection = (nn.Linear(representation_dim, representation_dim, bias=False)
+                           if representation_dim is not None else nn.Identity())
+        if isinstance(self.projection, nn.Linear):
+            nn.init.eye_(self.projection.weight)
         self.register_buffer('anchor_indices', None)
         self.register_buffer('target_distribution', None)
         self.register_buffer('cached_item_projection', None)

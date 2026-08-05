@@ -64,6 +64,7 @@ class Evaluator:
             'UIF_baseline_DIF': self.baseline_dif,
             'UIF_w1': self.uif_w1,
             'UIF_w2': self.uif_w2,
+            'UIF_normalized': self.baseline_duf is not None and self.baseline_dif is not None,
         }
 
     def evaluate(self, user_embeddings=None, item_embeddings=None, model=None,

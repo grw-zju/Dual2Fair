@@ -13,5 +13,6 @@ Implementations under `baseline/` are local compatible implementations unless ex
 | Ada2Fair | `baseline/ada2fair.py` | local approximation |
 | FAIR | `baseline/fair_method.py` | local implementation |
 | FairSort | `baseline/fairsort.py` | local implementation |
+| Popularity-IPS | `baseline/popularity_ips.py` | local inverse-propensity popularity reweighting baseline |
 
 Any future official adapter must record repository URL, commit hash, local modifications, input conversion, and hyperparameter search space before being included in comparison tables.

@@ -45,6 +45,9 @@ baseline:
   multifr:
     lambda_item: 0.1
     lambda_user: 0.1
+  popularity_ips:
+    alpha: 0.5
+    max_weight: 10.0
   ufr:
     delta: 0.05
 dataset:
@@ -76,6 +79,9 @@ dual2fair:
   item_anchor_count: 256
   user_chunk_size: 4096
   ot_update_interval: 1
+  merit_user_sample_size: 1024
+  merit_item_sample_size: 2048
+  merit_user_batch_size: 64
   optimization_mode: mirror_alternating
   bilevel_beta: 3
   mirror_alpha1: 1.0
@@ -100,6 +106,7 @@ general:
   num_workers: 4
   seed: 42
 grid_search:
+  ndcg_drop_tolerance: 0.01
   lambda1_range:
   - 0.01
   - 0.05

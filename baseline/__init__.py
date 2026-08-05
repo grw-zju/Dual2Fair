@@ -7,6 +7,7 @@ from .multifr import MultiFR
 from .ada2fair import Ada2Fair
 from .fair_method import FAIRMethod
 from .fairsort import FairSort
+from .popularity_ips import PopularityIPS
 
 
 BASELINES = {
@@ -19,6 +20,7 @@ BASELINES = {
     'ada2fair': Ada2Fair,
     'fair': FAIRMethod,
     'fairsort': FairSort,
+    'popularity_ips': PopularityIPS,
 }
 
 
@@ -32,6 +34,7 @@ CATEGORIES = {
     'ada2fair': 'two-sided',
     'fair': 'two-sided',
     'fairsort': 'two-sided',
+    'popularity_ips': 'item-side',
 }
 
 
@@ -45,4 +48,5 @@ PROCESSING_TYPES = {
     'ada2fair': 'in-processing',
     'fair': 'in-processing',
     'fairsort': 'post-processing',
+    'popularity_ips': 'in-processing',
 }

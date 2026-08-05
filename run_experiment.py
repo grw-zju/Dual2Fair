@@ -13,7 +13,7 @@ from baseline import BASELINES, CATEGORIES, PROCESSING_TYPES
 
 def run_all_experiments(config_path='config/default.yaml', datasets=None,
                        backbones=None, methods=None, eval_mode='sampled',
-                       gpu=0, seed=42):
+                       gpu=0, seed=42, split_seed=2026):
     config = load_config(config_path)
     device = get_device(gpu)
 
@@ -23,7 +23,8 @@ def run_all_experiments(config_path='config/default.yaml', datasets=None,
         backbones = ['neumf', 'vaecf', 'lightgcn']
     if methods is None:
         methods = ['standard', 'dual2fair', 'ufr', 'hyperuof', 'dpr', 'fairdual',
-                   'cpfair', 'multifr', 'ada2fair', 'fair', 'fairsort']
+                   'cpfair', 'multifr', 'ada2fair', 'fair', 'fairsort',
+                   'popularity_ips']
 
     save_dir = 'saved_models'
     os.makedirs(save_dir, exist_ok=True)
@@ -39,9 +40,14 @@ def run_all_experiments(config_path='config/default.yaml', datasets=None,
 
         set_seed(seed)
         ds_config = config.get('dataset', {}).get(dataset_name, {})
+        split_path = os.path.join(results_dir, 'splits',
+                                  f'{dataset_name}_seed{split_seed}.json')
         dataset = load_dataset(dataset_name,
                                min_ui=ds_config.get('min_user_interactions', 5),
-                               min_ii=ds_config.get('min_item_interactions', 5))
+                               min_ii=ds_config.get('min_item_interactions', 5),
+                               data_split_seed=split_seed,
+                               negative_sampling_seed=config.get('seeds', {}).get(
+                                   'negative_sampling', 42), split_path=split_path)
         print(f"Users: {dataset.n_users}, Items: {dataset.n_items}, "
               f"Interactions: {len(dataset.interactions)}")
 
@@ -177,7 +183,9 @@ if __name__ == '__main__':
                         choices=['sampled', 'full'])
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--split-seed', type=int, default=2026)
     args = parser.parse_args()
 
     run_all_experiments(args.config, args.datasets, args.backbones, args.methods,
-                       eval_mode=args.eval_mode, gpu=args.gpu, seed=args.seed)
+                       eval_mode=args.eval_mode, gpu=args.gpu, seed=args.seed,
+                       split_seed=args.split_seed)

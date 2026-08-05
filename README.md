@@ -54,7 +54,8 @@ Historical workspace counts were MovieLens 6,034/3,125/574,376, Epinions 20,382/
 - **VAECF**: decoder hidden user representation, decoder output weights, and decoder bias.
 - **User OT**: all disadvantaged users are processed in chunks against GMM prototypes.
 - **Item OT**: all items map through deterministic landmarks; no random evaluation subset.
-- **Item target**: merit–uniform mixture by default; uniform and merit modes are ablations.
+- **Item target**: merit–uniform mixture estimated from deterministic sampled training users and item anchors through the native scorer; uniform and merit modes are ablations.
+- **Popularity baseline**: `popularity_ips` provides inverse-propensity popularity reweighting.
 
 ## Metrics
 

@@ -402,7 +402,11 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
         if epoch % update_interval == 0 or model.last_output is None:
             model.clear_calibration_state()
             model.update_calibration_state()
-        if loss_type == 'bce':
+        if backbone_name == 'vaecf':
+            users = torch.randperm(dataset.n_users)
+            batches = [(users[start:start + batch_size].to(device), None, None)
+                       for start in range(0, len(users), batch_size)]
+        elif loss_type == 'bce':
             users, items, labels = sample_bce_negatives(
                 dataset, model_config.get('n_neg_bce', 4))
             permutation = torch.randperm(len(users))
@@ -425,6 +429,9 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
         for first, second, third in batches:
             def recommendation_closure():
                 model.refresh_scoring_state()
+                if backbone_name == 'vaecf':
+                    backbone.update_count += 1
+                    return model.vaecf_reconstruction_loss(first)
                 return (model.bce_loss(first, second, third) if loss_type == 'bce'
                         else model.bpr_loss(first, second, third))
 
@@ -573,9 +580,16 @@ def train_inprocessing_baseline(dataset, backbone_name, baseline_name, config, d
                                     eta=baseline_config.get('eta', 0.01),
                                     device=device)
         optimizer = torch.optim.Adam(backbone.parameters(), lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+    elif baseline_name == 'popularity_ips':
+        baseline_obj = baseline_cls(
+            alpha=baseline_config.get('alpha', 0.5),
+            max_weight=baseline_config.get('max_weight', 10.0), device=device)
+        optimizer = torch.optim.Adam(backbone.parameters(), lr=lr,
+                                     weight_decay=model_config.get('weight_decay', 1e-5))
     else:
         baseline_obj = baseline_cls()
-        optimizer = torch.optim.Adam(backbone.parameters(), lr=lr, weight_decay=model_config.get('weight_decay', 1e-5))
+        optimizer = torch.optim.Adam(backbone.parameters(), lr=lr,
+                                     weight_decay=model_config.get('weight_decay', 1e-5))
 
     val_evaluator = _make_evaluator(dataset, config, device, split='val')
     test_evaluator = _make_evaluator(dataset, config, device, split='test')
@@ -649,6 +663,9 @@ def train_inprocessing_baseline(dataset, backbone_name, baseline_name, config, d
                     fair_loss = compute_baseline_fair_loss(
                         baseline_name, baseline_obj, backbone, dataset, adv_users, disadv_users)
                     total = weighted_bpr + fair_loss
+                elif baseline_name == 'popularity_ips':
+                    total = baseline_obj.weighted_bpr_loss(
+                        backbone, u_b, p_b, n_b, dataset.item_freq)
                 else:
                     rec_loss = backbone.bpr_loss(u_b, p_b, n_b)
                     fair_loss = compute_baseline_fair_loss(
@@ -1032,7 +1049,8 @@ def main():
                         choices=['neumf', 'vaecf', 'lightgcn'])
     parser.add_argument('--method', type=str, default='standard',
                         choices=['standard', 'dual2fair', 'ufr', 'hyperuof', 'dpr',
-                                 'fairdual', 'cpfair', 'multifr', 'ada2fair', 'fair', 'fairsort'])
+                                 'fairdual', 'cpfair', 'multifr', 'ada2fair', 'fair',
+                                 'fairsort', 'popularity_ips'])
     parser.add_argument('--lambda1', type=float, default=0.1)
     parser.add_argument('--lambda2', type=float, default=0.1)
     parser.add_argument('--eval_mode', type=str, default='sampled',
