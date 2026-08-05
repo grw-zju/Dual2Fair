@@ -81,17 +81,7 @@ python scripts/benchmark_scaling.py --items 10000 --anchors 256
 
 Checkpoints include backbone/calibration parameters, GMM/prototype buffers, item anchors and target distribution, optimizer/scheduler state when supplied, resolved configuration, and split hash. Frequencies, groups, GMM inputs, and merit targets use training interactions only.
 
-## Documentation
-
-- `docs/CODE_PAPER_AUDIT.md`
-- `docs/METHOD_SPEC.md`
-- `docs/EXPERIMENT_PROTOCOL.md`
-- `docs/DATASET_MANIFEST.md`
-- `docs/BASELINE_MANIFEST.md`
-- `docs/REVIEWER_EVIDENCE_MATRIX.md`
-- `docs/MANUSCRIPT_PATCHES.md`
-
-Baseline files in `baseline/` are local compatible implementations unless a pinned official source is explicitly recorded in `docs/BASELINE_MANIFEST.md`.
+Baseline files in `baseline/` are local compatible implementations unless their source is explicitly stated.
 
 ## Citation
 
