@@ -89,7 +89,10 @@ def _make_evaluator(dataset, config, device, split='test'):
                           num_repeats=eval_config.get('num_repeats', 1),
                           n_neg_sampled=eval_config.get('n_neg_sampled', 99),
                           device=device, split=split,
-                          max_full_eval_scores=eval_config.get('max_full_eval_scores', 50000000))
+                          max_full_eval_scores=eval_config.get('max_full_eval_scores', 50000000),
+                          dif_mode=eval_config.get('dif_mode', 'affine_invariant'),
+                          uif_w1=eval_config.get('uif_w1', 0.5),
+                          uif_w2=eval_config.get('uif_w2', 0.5))
     evaluator.set_baseline(None,
                            eval_config.get('baseline_duf'),
                            eval_config.get('baseline_dif'))
@@ -353,6 +356,7 @@ def train_standard(dataset, backbone_name, config, device, eval_mode='sampled',
     print(f"[Standard/{backbone_name}] Test: {test_results}")
     user_embs = backbone.get_user_embeddings().detach().cpu().numpy()
     item_embs = backbone.get_item_embeddings().detach().cpu().numpy()
+    backbone._best_validation_results = best_results
     return backbone, user_embs, item_embs, best_ndcg, test_results
 
 
@@ -419,7 +423,9 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
                 l_b = bce_labels[bs:be].to(device)
 
                 optimizer.zero_grad()
-                rec_loss = backbone.bce_loss(u_b, i_b, l_b)
+                dual2fair.clear_calibration_state()
+                dual2fair.update_calibration_state()
+                rec_loss = dual2fair.bce_loss(u_b, i_b, l_b)
                 rec_loss.backward()
                 if clip_norm > 0:
                     clip_gradients(backbone, clip_norm)
@@ -428,7 +434,7 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
                     backbone._clear_cache()
 
                 global_step += 1
-                L_user, L_item = dual2fair.compute_fairness_losses()
+                L_user, L_item = dual2fair.compute_fairness_losses(refresh=True)
                 L_fair = lambda1 * L_user + lambda2 * L_item
                 total_user_loss += L_user.item()
                 total_item_loss += L_item.item()
@@ -443,7 +449,7 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
                         backbone._clear_cache()
 
                     optimizer.zero_grad()
-                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses()
+                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses(refresh=True)
                     L_fair_2 = lambda1 * L_user_2 + lambda2 * L_item_2
                     L_fair_2.backward()
                     if clip_norm > 0:
@@ -475,7 +481,9 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
                 n_b = neg_items[bs:be].to(device)
 
                 optimizer.zero_grad()
-                rec_loss = backbone.bpr_loss(u_b, p_b, n_b)
+                dual2fair.clear_calibration_state()
+                dual2fair.update_calibration_state()
+                rec_loss = dual2fair.bpr_loss(u_b, p_b, n_b)
                 rec_loss.backward()
                 if clip_norm > 0:
                     clip_gradients(backbone, clip_norm)
@@ -484,7 +492,7 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
                     backbone._clear_cache()
 
                 global_step += 1
-                L_user, L_item = dual2fair.compute_fairness_losses()
+                L_user, L_item = dual2fair.compute_fairness_losses(refresh=True)
                 L_fair = lambda1 * L_user + lambda2 * L_item
                 total_user_loss += L_user.item()
                 total_item_loss += L_item.item()
@@ -499,7 +507,7 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
                         backbone._clear_cache()
 
                     optimizer.zero_grad()
-                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses()
+                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses(refresh=True)
                     L_fair_2 = lambda1 * L_user_2 + lambda2 * L_item_2
                     L_fair_2.backward()
                     if clip_norm > 0:
@@ -1083,7 +1091,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Dual2Fair: Decoupled User-Item Representation Alignment')
     parser.add_argument('--dataset', type=str, default='movielens',
-                        choices=['movielens', 'epinions', 'gowalla'])
+                        choices=['demo', 'movielens', 'epinions', 'gowalla'])
     parser.add_argument('--backbone', type=str, default='lightgcn',
                         choices=['neumf', 'vaecf', 'lightgcn'])
     parser.add_argument('--method', type=str, default='standard',
@@ -1097,6 +1105,8 @@ def main():
                         choices=['bce', 'bpr'])
     parser.add_argument('--config', type=str, default='config/default.yaml')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seeds', type=int, nargs='+', default=None)
+    parser.add_argument('--split-seed', type=int, default=2026)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--save_dir', type=str, default='saved_models')
     parser.add_argument('--results_dir', type=str, default='results')
@@ -1104,13 +1114,55 @@ def main():
 
     set_seed(args.seed)
     config = load_config(args.config)
+    if args.seeds:
+        import subprocess
+        aggregate = []
+        for model_seed in args.seeds:
+            command = [sys.executable, os.path.abspath(__file__), '--dataset', args.dataset,
+                       '--backbone', args.backbone, '--method', args.method,
+                       '--lambda1', str(args.lambda1), '--lambda2', str(args.lambda2),
+                       '--eval_mode', args.eval_mode, '--loss_type', args.loss_type,
+                       '--config', args.config, '--seed', str(model_seed),
+                       '--split-seed', str(args.split_seed), '--gpu', str(args.gpu),
+                       '--save_dir', args.save_dir, '--results_dir', args.results_dir]
+            subprocess.run(command, check=True)
+            result_path = os.path.join(args.results_dir,
+                                       f'{args.dataset}_{args.backbone}_{args.method}_seed{model_seed}.json')
+            legacy_path = os.path.join(args.results_dir,
+                                       f'{args.dataset}_{args.backbone}_{args.method}.json')
+            with open(legacy_path, 'r') as handle:
+                result = json.load(handle)
+            result['model_seed'] = model_seed
+            with open(result_path, 'w') as handle:
+                json.dump(result, handle, indent=2)
+            aggregate.append(result)
+        numeric = ['NDCG', 'Hit', 'DUF', 'DIF', 'UIF']
+        summary = {'seeds': args.seeds, 'runs': aggregate, 'split_seed': args.split_seed}
+        for key in numeric:
+            values = np.asarray([run[key] for run in aggregate], dtype=float)
+            summary[key] = {'mean': float(values.mean()), 'std': float(values.std(ddof=1)) if len(values) > 1 else 0.0,
+                            'ci95': float(1.96 * values.std(ddof=1) / math.sqrt(len(values))) if len(values) > 1 else 0.0}
+        summary_path = os.path.join(args.results_dir,
+                                    f'{args.dataset}_{args.backbone}_{args.method}_aggregate.json')
+        with open(summary_path, 'w') as handle:
+            json.dump(summary, handle, indent=2)
+        print(f'Multi-seed summary saved to {summary_path}')
+        return
+    config.setdefault('seeds', {})['model'] = args.seed
+    config['seeds']['data_split'] = args.split_seed
     device = get_device(args.gpu)
     print(f"Using device: {device}")
 
     ds_config = config.get('dataset', {}).get(args.dataset, {})
+    seed_config = config.get('seeds', {})
+    split_path = os.path.join(args.results_dir, 'splits',
+                              f'{args.dataset}_seed{args.split_seed}.json')
     dataset = load_dataset(args.dataset,
                            min_ui=ds_config.get('min_user_interactions', 5),
-                           min_ii=ds_config.get('min_item_interactions', 5))
+                           min_ii=ds_config.get('min_item_interactions', 5),
+                           data_split_seed=args.split_seed,
+                           negative_sampling_seed=seed_config.get('negative_sampling', 42),
+                           split_path=split_path)
     print(f"Dataset: {args.dataset}, Users: {dataset.n_users}, Items: {dataset.n_items}, "
           f"Interactions: {len(dataset.interactions)}")
 

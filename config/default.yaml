@@ -48,6 +48,9 @@ baseline:
   ufr:
     delta: 0.05
 dataset:
+  demo:
+    min_item_interactions: 1
+    min_user_interactions: 3
   epinions:
     min_item_interactions: 5
     min_user_interactions: 5
@@ -60,18 +63,38 @@ dataset:
 dual2fair:
   adv_ratio: 0.05
   fusion_alpha: 0.5
-  l2: 500
-  max_disadv_users: 4096
-  max_ot_items: 4096
+  rho_u: 0.5
+  rho_v: 0.5
+  n_clusters: 64
   sinkhorn_epsilon: 0.1
+  sinkhorn_max_iter: 100
+  sinkhorn_convergence_tol: 0.001
+  transport_backend: landmark
+  item_target_mode: merit_uniform_mixture
+  merit_uniform_gamma: 0.5
+  max_ot_items: 4096
+  item_anchor_count: 256
+  user_chunk_size: 4096
+  ot_update_interval: 1
+  optimization_mode: mirror_alternating
+  bilevel_beta: 3
+  mirror_alpha1: 1.0
+  mirror_alpha2: 0.1
 evaluation:
   adv_ratio: 0.05
+  dif_mode: affine_invariant
   max_full_eval_scores: 50000000
   n_neg_sampled: 99
-  num_repeats: 5
+  num_repeats: 1
   top_k: 10
   uif_w1: 0.5
   uif_w2: 0.5
+seeds:
+  data_split: 2026
+  negative_sampling: 42
+  model: 42
+  ot_sampling: 42
+  evaluation: 42
 general:
   gpu: 0
   num_workers: 4

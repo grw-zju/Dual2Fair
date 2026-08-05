@@ -26,3 +26,5 @@ data 2/
 
 # Keep lightweight documentation/loader files
 !data/dataset_utils.py
+!data/demo/
+!data/demo/interactions.csv

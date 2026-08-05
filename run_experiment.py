@@ -53,17 +53,24 @@ def run_all_experiments(config_path='config/default.yaml', datasets=None,
                 save_path=save_path)
 
             key = f"{dataset_name}_{backbone_name}_standard"
+            validation_results = getattr(backbone, '_best_validation_results', results)
+            baseline_cfg = dict(config.get('evaluation', {}))
+            baseline_cfg['baseline_duf'] = validation_results['DUF']
+            baseline_cfg['baseline_dif'] = validation_results['DIF']
+            w1 = baseline_cfg.get('uif_w1', 0.5)
+            w2 = baseline_cfg.get('uif_w2', 0.5)
+            if results['NDCG'] > 0 and validation_results['DUF'] > 0 and validation_results['DIF'] > 0:
+                results['UIF'] = (w1 * results['DUF'] / validation_results['DUF']
+                                  + w2 * results['DIF'] / validation_results['DIF']) / results['NDCG']
             all_results[key] = {
                 'NDCG': round(results['NDCG'], 4),
                 'Hit': round(results['Hit'], 4),
                 'DUF': round(results['DUF'], 4),
                 'DIF': round(results['DIF'], 4),
                 'UIF': round(results['UIF'], 4),
+                'UIF_baseline_DUF': validation_results['DUF'],
+                'UIF_baseline_DIF': validation_results['DIF'],
             }
-
-            baseline_cfg = dict(config.get('evaluation', {}))
-            baseline_cfg['baseline_duf'] = results['DUF']
-            baseline_cfg['baseline_dif'] = results['DIF']
             config.setdefault('evaluation_by_backbone', {})[
                 f"{dataset_name}_{backbone_name}"] = baseline_cfg
 
