@@ -1,13 +1,15 @@
 import argparse
 import json
+import os
+import sys
 import time
 import tracemalloc
 
 import torch
 
-from data.dataset_utils import load_dataset
-from models.dual2fair.transport import (dense_log_sinkhorn,
-                                        deterministic_landmark_indices,
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.dual2fair.transport import (deterministic_landmark_indices,
                                         landmark_transport)
 
 

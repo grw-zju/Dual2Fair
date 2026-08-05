@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data.dataset_utils import Dataset, load_dataset
 from models.backbone import get_backbone, NeuMF, VAECF, LightGCN
 from models.dual2fair import Dual2Fair
+from models.dual2fair.optimization import MirrorAlternatingOptimizer
 from evaluation.evaluator import Evaluator
 from baseline import BASELINES, CATEGORIES, PROCESSING_TYPES
 
@@ -364,226 +365,161 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
                     eval_mode='sampled', loss_type='bpr', save_path=None):
     backbone = init_backbone(backbone_name, dataset, config, device)
     backbone._backbone_name_hint = backbone_name
-
     d2f_config = dict(config.get('dual2fair', {}))
-    d2f_config['lambda1'] = lambda1
-    d2f_config['lambda2'] = lambda2
+    d2f_config.update({'lambda1': lambda1, 'lambda2': lambda2})
     full_config = dict(config)
     full_config['dual2fair'] = d2f_config
-
-    dual2fair = Dual2Fair(backbone, dataset, full_config, device)
+    model = Dual2Fair(backbone, dataset, full_config, device, backbone_name)
 
     model_config = config.get('model', {})
-    lr = model_config.get('learning_rate', 0.001)
-    optimizer = torch.optim.Adam(backbone.parameters(), lr=lr,
+    learning_rate = model_config.get('learning_rate', 0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=model_config.get('weight_decay', 1e-5))
-
     val_evaluator = _make_evaluator(dataset, config, device, split='val')
     test_evaluator = _make_evaluator(dataset, config, device, split='test')
+    mode = d2f_config.get('optimization_mode', 'mirror_alternating')
+    if mode not in {'joint_weighted_sum', 'alternating', 'mirror_alternating'}:
+        raise ValueError(f'Unsupported optimization mode: {mode}')
+    mirror = MirrorAlternatingOptimizer(
+        alpha1=d2f_config.get('mirror_alpha1', 1.0),
+        alpha2=d2f_config.get('mirror_alpha2', 0.1),
+        interval=d2f_config.get('bilevel_beta', 3), learning_rate=learning_rate,
+        clip_norm=model_config.get('gradient_clip_val', 1.0))
 
-    best_ndcg = 0.0
-    best_results = None
-    best_state = None
-    patience = 0
     max_epochs = model_config.get('max_epochs', 200)
-    early_stop = model_config.get('early_stop_patience', 50)
+    patience_limit = model_config.get('early_stop_patience', 50)
     batch_size = model_config.get('batch_size', 4096)
-    n_neg = model_config.get('n_neg', 1)
-
-    bilevel_beta = d2f_config.get('bilevel_beta', 3)
-    mirror_alpha1 = d2f_config.get('mirror_alpha1', 1.0)
-    mirror_alpha2 = d2f_config.get('mirror_alpha2', 0.1)
     clip_norm = model_config.get('gradient_clip_val', 1.0)
+    update_interval = max(1, d2f_config.get('ot_update_interval', 1))
+    best_ndcg = float('-inf')
+    best_results = None
+    best_checkpoint = None
+    patience = 0
     global_step = 0
 
     for epoch in range(max_epochs):
-        backbone.train()
-        if hasattr(backbone, '_clear_cache'):
-            backbone._clear_cache()
-        t0 = time.time()
-
-        total_loss = 0.0
-        total_user_loss = 0.0
-        total_item_loss = 0.0
-        n_batches = 0
-
+        model.train()
+        if epoch % update_interval == 0 or model.last_output is None:
+            model.clear_calibration_state()
+            model.update_calibration_state()
         if loss_type == 'bce':
-            n_neg_bce = model_config.get('n_neg_bce', 4)
-            bce_user_ids, bce_item_ids, bce_labels = sample_bce_negatives(dataset, n_neg_bce)
-            n_bce_samples = len(bce_user_ids)
-            bce_perm = torch.randperm(n_bce_samples)
-            bce_user_ids = bce_user_ids[bce_perm]
-            bce_item_ids = bce_item_ids[bce_perm]
-            bce_labels = bce_labels[bce_perm]
-
-            for bs in range(0, n_bce_samples, batch_size):
-                be = min(bs + batch_size, n_bce_samples)
-                u_b = bce_user_ids[bs:be].to(device)
-                i_b = bce_item_ids[bs:be].to(device)
-                l_b = bce_labels[bs:be].to(device)
-
-                optimizer.zero_grad()
-                dual2fair.clear_calibration_state()
-                dual2fair.update_calibration_state()
-                rec_loss = dual2fair.bce_loss(u_b, i_b, l_b)
-                rec_loss.backward()
-                if clip_norm > 0:
-                    clip_gradients(backbone, clip_norm)
-                optimizer.step()
-                if hasattr(backbone, '_clear_cache'):
-                    backbone._clear_cache()
-
-                global_step += 1
-                L_user, L_item = dual2fair.compute_fairness_losses(refresh=True)
-                L_fair = lambda1 * L_user + lambda2 * L_item
-                total_user_loss += L_user.item()
-                total_item_loss += L_item.item()
-
-                if global_step % bilevel_beta == 0:
-                    optimizer.zero_grad()
-                    L_fair.backward()
-                    if clip_norm > 0:
-                        clip_gradients(backbone, clip_norm)
-                    manual_param_step(backbone.parameters(), -mirror_alpha1 * lr)
-                    if hasattr(backbone, '_clear_cache'):
-                        backbone._clear_cache()
-
-                    optimizer.zero_grad()
-                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses(refresh=True)
-                    L_fair_2 = lambda1 * L_user_2 + lambda2 * L_item_2
-                    L_fair_2.backward()
-                    if clip_norm > 0:
-                        clip_gradients(backbone, clip_norm)
-                    manual_param_step(backbone.parameters(), mirror_alpha2 * lr)
-                    optimizer.zero_grad()
-                else:
-                    optimizer.zero_grad()
-                    L_fair.backward()
-                    if clip_norm > 0:
-                        clip_gradients(backbone, clip_norm)
-                    manual_param_step(backbone.parameters(), -lr)
-                    optimizer.zero_grad()
-
-                total_loss += rec_loss.item()
-                n_batches += 1
+            users, items, labels = sample_bce_negatives(
+                dataset, model_config.get('n_neg_bce', 4))
+            permutation = torch.randperm(len(users))
+            users, items, labels = users[permutation], items[permutation], labels[permutation]
+            batches = [(users[start:start + batch_size].to(device),
+                        items[start:start + batch_size].to(device),
+                        labels[start:start + batch_size].to(device))
+                       for start in range(0, len(users), batch_size)]
         else:
-            user_ids, pos_items, neg_items = sample_negatives(dataset, n_neg)
-            n_samples = len(user_ids)
-            perm = torch.randperm(n_samples)
-            user_ids = user_ids[perm]
-            pos_items = pos_items[perm]
-            neg_items = neg_items[perm]
+            users, positive, negative = sample_negatives(
+                dataset, model_config.get('n_neg', 1))
+            permutation = torch.randperm(len(users))
+            users, positive, negative = users[permutation], positive[permutation], negative[permutation]
+            batches = [(users[start:start + batch_size].to(device),
+                        positive[start:start + batch_size].to(device),
+                        negative[start:start + batch_size].to(device))
+                       for start in range(0, len(users), batch_size)]
 
-            for bs in range(0, n_samples, batch_size):
-                be = min(bs + batch_size, n_samples)
-                u_b = user_ids[bs:be].to(device)
-                p_b = pos_items[bs:be].to(device)
-                n_b = neg_items[bs:be].to(device)
+        recommendation_total = user_total = item_total = 0.0
+        for first, second, third in batches:
+            def recommendation_closure():
+                model.refresh_scoring_state()
+                return (model.bce_loss(first, second, third) if loss_type == 'bce'
+                        else model.bpr_loss(first, second, third))
 
+            def fairness_closure():
+                user_loss, item_loss = model.training_fairness_losses()
+                return lambda1 * user_loss + lambda2 * item_loss
+
+            if mode == 'joint_weighted_sum':
                 optimizer.zero_grad()
-                dual2fair.clear_calibration_state()
-                dual2fair.update_calibration_state()
-                rec_loss = dual2fair.bpr_loss(u_b, p_b, n_b)
-                rec_loss.backward()
+                recommendation_loss = recommendation_closure()
+                user_loss, item_loss = model.training_fairness_losses(refresh=False)
+                total = recommendation_loss + lambda1 * user_loss + lambda2 * item_loss
+                total.backward()
                 if clip_norm > 0:
-                    clip_gradients(backbone, clip_norm)
+                    clip_gradients(model, clip_norm)
                 optimizer.step()
-                if hasattr(backbone, '_clear_cache'):
-                    backbone._clear_cache()
+                model.clear_calibration_state()
+            elif mode == 'alternating':
+                optimizer.zero_grad()
+                recommendation_loss = recommendation_closure()
+                recommendation_loss.backward()
+                if clip_norm > 0:
+                    clip_gradients(model, clip_norm)
+                optimizer.step()
+                model.clear_calibration_state()
+                optimizer.zero_grad()
+                user_loss, item_loss = model.training_fairness_losses()
+                (lambda1 * user_loss + lambda2 * item_loss).backward()
+                if clip_norm > 0:
+                    clip_gradients(model, clip_norm)
+                optimizer.step()
+                model.clear_calibration_state()
+            else:
+                recommendation_loss, _, _ = mirror.step(
+                    model, optimizer, recommendation_closure, fairness_closure)
+                with torch.no_grad():
+                    user_loss, item_loss = model.training_fairness_losses()
+            recommendation_total += float(recommendation_loss.detach().cpu())
+            user_total += float(user_loss.detach().cpu())
+            item_total += float(item_loss.detach().cpu())
+            global_step += 1
 
-                global_step += 1
-                L_user, L_item = dual2fair.compute_fairness_losses(refresh=True)
-                L_fair = lambda1 * L_user + lambda2 * L_item
-                total_user_loss += L_user.item()
-                total_item_loss += L_item.item()
-
-                if global_step % bilevel_beta == 0:
-                    optimizer.zero_grad()
-                    L_fair.backward()
-                    if clip_norm > 0:
-                        clip_gradients(backbone, clip_norm)
-                    manual_param_step(backbone.parameters(), -mirror_alpha1 * lr)
-                    if hasattr(backbone, '_clear_cache'):
-                        backbone._clear_cache()
-
-                    optimizer.zero_grad()
-                    L_user_2, L_item_2 = dual2fair.compute_fairness_losses(refresh=True)
-                    L_fair_2 = lambda1 * L_user_2 + lambda2 * L_item_2
-                    L_fair_2.backward()
-                    if clip_norm > 0:
-                        clip_gradients(backbone, clip_norm)
-                    manual_param_step(backbone.parameters(), mirror_alpha2 * lr)
-                    optimizer.zero_grad()
-                else:
-                    optimizer.zero_grad()
-                    L_fair.backward()
-                    if clip_norm > 0:
-                        clip_gradients(backbone, clip_norm)
-                    manual_param_step(backbone.parameters(), -lr)
-                    optimizer.zero_grad()
-
-                total_loss += rec_loss.item()
-                n_batches += 1
-
-        avg_loss = total_loss / max(1, n_batches)
-        L_user_val = total_user_loss / max(1, n_batches)
-        L_item_val = total_item_loss / max(1, n_batches)
-
-        if hasattr(backbone, '_clear_cache'):
-            backbone._clear_cache()
-        backbone.eval()
-        if backbone_name == 'lightgcn':
-            backbone._update_cache()
-
-        calibrated_user_embs, item_embs = dual2fair.get_calibrated_embeddings()
-        calibrated_user_np = calibrated_user_embs.detach().cpu().numpy()
-        item_np = item_embs.detach().cpu().numpy()
-
-        if eval_mode == 'sampled':
-            results = val_evaluator.sampled_evaluate(user_embeddings=calibrated_user_np,
-                                                     item_embeddings=item_np)
-        else:
-            results = val_evaluator.evaluate(user_embeddings=calibrated_user_np,
-                                             item_embeddings=item_np)
-
-        t1 = time.time()
-        tag = 'S-NDCG' if eval_mode == 'sampled' else 'F-NDCG'
-        print(f"[Dual2Fair/{backbone_name}] Epoch {epoch+1}: loss={avg_loss:.4f}, "
-              f"L_user={L_user_val:.4f}, L_item={L_item_val:.4f}, "
-              f"{tag}={results['NDCG']:.4f}, Hit={results['Hit']:.4f}, "
-              f"DUF={results['DUF']:.6f}, DIF={results['DIF']:.6f}, "
-              f"time={t1-t0:.1f}s")
-
+        model.eval()
+        model.clear_calibration_state()
+        model.update_calibration_state()
+        results = evaluate_embeddings_or_model(val_evaluator, eval_mode, model=model)
+        print(f"[Dual2Fair/{backbone_name}] Epoch {epoch + 1}: "
+              f"loss={recommendation_total / max(1, len(batches)):.4f}, "
+              f"L_user={user_total / max(1, len(batches)):.4f}, "
+              f"L_item={item_total / max(1, len(batches)):.4f}, "
+              f"NDCG={results['NDCG']:.4f}")
         if results['NDCG'] > best_ndcg:
             best_ndcg = results['NDCG']
             best_results = dict(results)
-            best_state = copy.deepcopy(backbone.state_dict())
+            best_checkpoint = copy.deepcopy(model.checkpoint_state(
+                optimizer=optimizer, epoch=epoch + 1, global_step=global_step))
             patience = 0
             if save_path:
-                torch.save({'backbone': backbone.state_dict()}, save_path)
+                torch.save(best_checkpoint, save_path)
         else:
             patience += 1
-
-        if patience >= early_stop:
-            print(f"Early stopping at epoch {epoch+1}")
+        if patience >= patience_limit:
             break
 
-    print(f"[Dual2Fair/{backbone_name}] Best val: {best_results}")
-    if best_state is not None:
-        backbone.load_state_dict(best_state)
-        if hasattr(backbone, '_clear_cache'):
-            backbone._clear_cache()
-    calibrated_user_embs, item_embs = dual2fair.get_calibrated_embeddings()
-    user_embs_np = calibrated_user_embs.detach().cpu().numpy()
-    item_embs_np = item_embs.detach().cpu().numpy()
-    if eval_mode == 'sampled':
-        test_results = test_evaluator.sampled_evaluate(user_embeddings=user_embs_np,
-                                                       item_embeddings=item_embs_np)
-    else:
-        test_results = test_evaluator.evaluate(user_embeddings=user_embs_np,
-                                               item_embeddings=item_embs_np)
-    print(f"[Dual2Fair/{backbone_name}] Test: {test_results}")
-    return backbone, user_embs_np, item_embs_np, best_ndcg, test_results
+    if best_checkpoint is None:
+        raise RuntimeError('Dual2Fair training produced no checkpoint')
+    model_state = best_checkpoint['model']
+    dynamic_buffers = {
+        'user_calibration.gmm_weights': (model.user_calibration, 'gmm_weights'),
+        'user_calibration.gmm_covariances': (model.user_calibration, 'gmm_covariances'),
+        'user_calibration.prototypes': (model.user_calibration, 'prototypes'),
+        'user_calibration.cached_gamma_u': (model.user_calibration, 'cached_gamma_u'),
+        'user_calibration.cached_user_ids': (model.user_calibration, 'cached_user_ids'),
+        'item_calibration.anchor_indices': (model.item_calibration, 'anchor_indices'),
+        'item_calibration.target_distribution': (model.item_calibration, 'target_distribution'),
+        'item_calibration.cached_item_projection': (model.item_calibration, 'cached_item_projection'),
+    }
+    for key, (module, name) in dynamic_buffers.items():
+        if key in model_state:
+            setattr(module, name, torch.empty_like(model_state[key], device=device))
+    model.load_state_dict(model_state)
+    model.eval()
+    model.calibration_state = None
+    model.last_output = None
+    if hasattr(backbone, '_clear_cache'):
+        backbone._clear_cache()
+    model.refresh_scoring_state()
+    test_results = evaluate_embeddings_or_model(test_evaluator, eval_mode, model=model)
+    first_scores = model.compute_all_scores().detach()
+    second_scores = model.compute_all_scores().detach()
+    if not torch.allclose(first_scores, second_scores, atol=1e-6, rtol=1e-6):
+        raise RuntimeError('Restored Dual2Fair inference is not deterministic')
+    model._best_validation_results = best_results
+    users, items = model.get_calibrated_embeddings()
+    return model, users.detach().cpu().numpy(), items.detach().cpu().numpy(), best_ndcg, test_results
 
 
 def train_inprocessing_baseline(dataset, backbone_name, baseline_name, config, device,
@@ -1110,6 +1046,7 @@ def main():
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--save_dir', type=str, default='saved_models')
     parser.add_argument('--results_dir', type=str, default='results')
+    parser.add_argument('--output-suffix', type=str, default='')
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -1124,17 +1061,13 @@ def main():
                        '--eval_mode', args.eval_mode, '--loss_type', args.loss_type,
                        '--config', args.config, '--seed', str(model_seed),
                        '--split-seed', str(args.split_seed), '--gpu', str(args.gpu),
-                       '--save_dir', args.save_dir, '--results_dir', args.results_dir]
+                       '--save_dir', args.save_dir, '--results_dir', args.results_dir,
+                       '--output-suffix', f'_seed{model_seed}']
             subprocess.run(command, check=True)
             result_path = os.path.join(args.results_dir,
                                        f'{args.dataset}_{args.backbone}_{args.method}_seed{model_seed}.json')
-            legacy_path = os.path.join(args.results_dir,
-                                       f'{args.dataset}_{args.backbone}_{args.method}.json')
-            with open(legacy_path, 'r') as handle:
+            with open(result_path, 'r') as handle:
                 result = json.load(handle)
-            result['model_seed'] = model_seed
-            with open(result_path, 'w') as handle:
-                json.dump(result, handle, indent=2)
             aggregate.append(result)
         numeric = ['NDCG', 'Hit', 'DUF', 'DIF', 'UIF']
         summary = {'seeds': args.seeds, 'runs': aggregate, 'split_seed': args.split_seed}
@@ -1169,7 +1102,7 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     os.makedirs(args.results_dir, exist_ok=True)
     save_path = os.path.join(args.save_dir,
-                             f"{args.dataset}_{args.backbone}_{args.method}.pt")
+                             f"{args.dataset}_{args.backbone}_{args.method}{args.output_suffix}.pt")
 
     if args.method == 'standard':
         backbone, user_embs, item_embs, ndcg, results = train_standard(
@@ -1182,8 +1115,21 @@ def main():
         backbone, results = train_baseline(
             dataset, args.backbone, args.method, config, device, args.eval_mode, args.loss_type, save_path)
 
+    results.update({
+        'dataset': args.dataset,
+        'backbone': args.backbone,
+        'method': args.method,
+        'model_seed': args.seed,
+        'data_split_seed': args.split_seed,
+        'negative_sampling_seed': seed_config.get('negative_sampling', 42),
+        'ot_sampling_seed': seed_config.get('ot_sampling', 42),
+        'evaluation_seed': seed_config.get('evaluation', 42),
+        'split_hash': dataset.split_hash,
+        'eval_mode': args.eval_mode,
+        'loss_type': args.loss_type,
+    })
     results_path = os.path.join(args.results_dir,
-                                f"{args.dataset}_{args.backbone}_{args.method}.json")
+                                f"{args.dataset}_{args.backbone}_{args.method}{args.output_suffix}.json")
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
 

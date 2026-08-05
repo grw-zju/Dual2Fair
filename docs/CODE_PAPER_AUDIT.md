@@ -1,13 +1,8 @@
-# Code–Paper Audit Document
+# Historical Code–Paper Audit
 
 **Audit Date**: 2026-08-05
-**Git Commit**: `dc3849a`
-**Auditor**: Automated code review (static analysis)
-
-## Summary
-
-The current implementation contains 18 defects ranging from critical math errors
-to documentation mismatches. All defects are confirmed by source-level inspection.
+**Audited Commit**: `dc3849a`
+**Status**: Historical audit of the pre-revision implementation. The defects below describe that audited commit and are retained as revision evidence; they are not claims about the current `main` branch.
 
 ---
 

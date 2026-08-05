@@ -105,6 +105,20 @@ class Dual2Fair(nn.Module):
         }
         return self.calibration_state
 
+    def training_fairness_losses(self, refresh=True):
+        state = self.refresh_scoring_state() if refresh else self._state()
+        user_ids = self.user_calibration.cached_user_ids
+        if user_ids is None or user_ids.numel() == 0:
+            user_loss = state['raw_user_repr'].sum() * 0.0
+        else:
+            raw_users = state['raw_user_repr'][user_ids]
+            calibrated_users = state['calibrated_user_repr'][user_ids]
+            user_loss = (1.0 - F.cosine_similarity(raw_users, calibrated_users.detach(), dim=1)).mean()
+        raw_items = state['raw_item_repr']
+        calibrated_items = state['calibrated_item_repr']
+        item_loss = (1.0 - F.cosine_similarity(raw_items, calibrated_items.detach(), dim=1)).mean()
+        return user_loss, item_loss
+
     def _state(self):
         if self.calibration_state is None:
             self.update_calibration_state()
@@ -163,6 +177,7 @@ class Dual2Fair(nn.Module):
         model_state = checkpoint['model']
         dynamic_buffers = {
             'user_calibration.gmm_weights': (self.user_calibration, 'gmm_weights'),
+            'user_calibration.gmm_covariances': (self.user_calibration, 'gmm_covariances'),
             'user_calibration.prototypes': (self.user_calibration, 'prototypes'),
             'user_calibration.cached_gamma_u': (self.user_calibration, 'cached_gamma_u'),
             'user_calibration.cached_user_ids': (self.user_calibration, 'cached_user_ids'),
@@ -178,8 +193,11 @@ class Dual2Fair(nn.Module):
             optimizer.load_state_dict(checkpoint['optimizer'])
         if scheduler is not None and checkpoint.get('scheduler') is not None:
             scheduler.load_state_dict(checkpoint['scheduler'])
-        self.clear_calibration_state()
-        self.update_calibration_state()
+        self.calibration_state = None
+        self.last_output = None
+        if hasattr(self.backbone, '_clear_cache'):
+            self.backbone._clear_cache()
+        self.refresh_scoring_state()
         return checkpoint
 
     def clear_calibration_state(self):

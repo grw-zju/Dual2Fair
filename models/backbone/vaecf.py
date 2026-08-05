@@ -68,15 +68,19 @@ class VAECF(BaseBackbone):
 
     def _all_latent_means(self):
         device = next(self.parameters()).device
-        was_training = self.training
-        self.eval()
+        if self.training:
+            chunks = []
+            for start in range(0, self.n_users, 1024):
+                rows = self._get_interact_batch(start, min(start + 1024, self.n_users)).to(device)
+                mean, _ = self._encode(rows)
+                chunks.append(mean)
+            return torch.cat(chunks, dim=0)
         chunks = []
         with torch.no_grad():
             for start in range(0, self.n_users, 1024):
                 rows = self._get_interact_batch(start, min(start + 1024, self.n_users)).to(device)
                 mean, _ = self._encode(rows)
                 chunks.append(mean)
-        self.train(was_training)
         return torch.cat(chunks, dim=0)
 
     def get_user_embeddings(self):

@@ -6,7 +6,7 @@ import torch.nn as nn
 class BackboneAdapter(nn.Module, ABC):
     def __init__(self, backbone):
         super().__init__()
-        self.backbone = backbone
+        object.__setattr__(self, 'backbone', backbone)
 
     @abstractmethod
     def get_raw_user_repr(self):

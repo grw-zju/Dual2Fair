@@ -24,6 +24,7 @@ class UserRepresentationCalibration(nn.Module):
         self.disadv_users = []
         self.user_items_dict = {}
         self.register_buffer('gmm_weights', None)
+        self.register_buffer('gmm_covariances', None)
         self.register_buffer('prototypes', None)
         self.register_buffer('cached_gamma_u', None)
         self.register_buffer('cached_user_ids', None)
@@ -50,10 +51,12 @@ class UserRepresentationCalibration(nn.Module):
         samples = interests[valid]
         if samples.numel() == 0:
             self.gmm_weights = None
+            self.gmm_covariances = None
             self.prototypes = None
             return
         if len(samples) == 1:
             self.gmm_weights = torch.ones(1, dtype=item_embs.dtype, device=item_embs.device)
+            self.gmm_covariances = torch.zeros_like(samples.detach())
             self.prototypes = samples.detach().clone()
             return
         n_components = min(self.n_clusters, len(samples))
@@ -62,6 +65,8 @@ class UserRepresentationCalibration(nn.Module):
         model.fit(samples.detach().cpu().numpy())
         self.gmm_weights = torch.as_tensor(model.weights_, dtype=item_embs.dtype,
                                            device=item_embs.device)
+        self.gmm_covariances = torch.as_tensor(model.covariances_, dtype=item_embs.dtype,
+                                               device=item_embs.device)
         self.prototypes = torch.as_tensor(model.means_, dtype=item_embs.dtype,
                                           device=item_embs.device)
 

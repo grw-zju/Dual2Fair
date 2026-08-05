@@ -1,7 +1,11 @@
 import argparse
 import json
+import os
+import sys
 
-from benchmark_efficiency import benchmark
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scripts.benchmark_efficiency import benchmark
 
 
 def main():

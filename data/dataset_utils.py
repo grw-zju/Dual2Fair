@@ -149,7 +149,9 @@ class Dataset:
         path = os.path.join(self.data_dir, DATASETS[self.name]['file'])
         df = pd.read_csv(path, sep='\t', header=None,
                          names=['user_id_raw', 'timestamp', 'latitude', 'longitude', 'item_id_raw'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce').astype('int64')
+        parsed_timestamp = pd.to_datetime(df['timestamp'], errors='coerce')
+        df = df[parsed_timestamp.notna()].copy()
+        df['timestamp'] = parsed_timestamp[parsed_timestamp.notna()].astype('int64')
         return self._remap_ids(df[['user_id_raw', 'item_id_raw', 'timestamp']].dropna())
 
     def _load_demo(self):
@@ -172,8 +174,12 @@ class Dataset:
         columns = ['user_id', 'item_id']
         if 'timestamp' in df.columns:
             columns.append('timestamp')
-        return df[columns].dropna(subset=['user_id', 'item_id']).astype(
-            {'user_id': int, 'item_id': int}).drop_duplicates(
+        result = df[columns].dropna(subset=['user_id', 'item_id']).astype(
+            {'user_id': int, 'item_id': int})
+        if 'timestamp' in result.columns:
+            result = result.dropna(subset=['timestamp']).sort_values(
+                ['timestamp', 'user_id', 'item_id'], kind='mergesort')
+        return result.drop_duplicates(
             subset=['user_id', 'item_id'], keep='last').reset_index(drop=True)
 
     def _filter(self, df):
@@ -223,6 +229,11 @@ class Dataset:
         payload = {
             'dataset': self.name,
             'data_split_seed': self.data_split_seed,
+            'min_ui': self.min_ui,
+            'min_ii': self.min_ii,
+            'n_users': self.n_users,
+            'n_items': self.n_items,
+            'interaction_hash': self._compute_interaction_hash(),
             'train': self.train_data.values.tolist(),
             'validation': self.val_data.values.tolist(),
             'test': self.test_data.values.tolist(),
@@ -233,11 +244,27 @@ class Dataset:
     def load_split(self, path):
         with open(path, 'r') as handle:
             payload = json.load(handle)
-        if payload.get('dataset') != self.name:
-            raise ValueError('Frozen split belongs to a different dataset')
+        expected = {
+            'dataset': self.name,
+            'data_split_seed': self.data_split_seed,
+            'min_ui': self.min_ui,
+            'min_ii': self.min_ii,
+            'n_users': self.n_users,
+            'n_items': self.n_items,
+            'interaction_hash': self._compute_interaction_hash(),
+        }
+        mismatches = [key for key, value in expected.items() if payload.get(key) != value]
+        if mismatches:
+            raise ValueError(f'Frozen split metadata mismatch: {", ".join(mismatches)}')
         columns = ['user_id', 'item_id']
-        return tuple(pd.DataFrame(payload[key], columns=columns)
-                     for key in ('train', 'validation', 'test'))
+        frames = tuple(pd.DataFrame(payload[key], columns=columns)
+                       for key in ('train', 'validation', 'test'))
+        for frame in frames:
+            if (not frame.empty and
+                    (frame['user_id'].min() < 0 or frame['user_id'].max() >= self.n_users or
+                     frame['item_id'].min() < 0 or frame['item_id'].max() >= self.n_items)):
+                raise ValueError('Frozen split contains out-of-range IDs')
+        return frames
 
     def save_id_mappings(self, path):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -248,11 +275,23 @@ class Dataset:
         with open(path, 'w') as handle:
             json.dump(payload, handle, sort_keys=True, indent=2)
 
+    def _compute_interaction_hash(self):
+        values = self.interactions[['user_id', 'item_id']].to_numpy(dtype=np.int64)
+        return hashlib.sha256(values.tobytes()).hexdigest()
+
     def _compute_split_hash(self):
-        parts = []
-        for frame in (self.train_data, self.val_data, self.test_data):
-            parts.append(frame[['user_id', 'item_id']].to_numpy(dtype=np.int64).tobytes())
-        return hashlib.sha256(b''.join(parts)).hexdigest()
+        digest = hashlib.sha256()
+        digest.update(self.name.encode())
+        digest.update(str(self.data_split_seed).encode())
+        digest.update(str(self.min_ui).encode())
+        digest.update(str(self.min_ii).encode())
+        digest.update(self._compute_interaction_hash().encode())
+        for name, frame in (('train', self.train_data), ('validation', self.val_data),
+                            ('test', self.test_data)):
+            digest.update(name.encode())
+            digest.update(str(len(frame)).encode())
+            digest.update(frame[['user_id', 'item_id']].to_numpy(dtype=np.int64).tobytes())
+        return digest.hexdigest()
 
     def _build_adj_mat(self):
         users = self.train_data['user_id'].to_numpy(dtype=np.int64)

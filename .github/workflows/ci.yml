@@ -9,5 +9,10 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install -r requirements.txt
-      - run: python -m compileall models data evaluation run.py run_experiment.py
+      - run: python -m compileall models data evaluation run.py run_experiment.py scripts tests
       - run: pytest
+      - run: python run.py --help
+      - run: python run_experiment.py --help
+      - run: python scripts/verify_dataset.py --dataset demo --min-user-interactions 3 --min-item-interactions 1
+      - run: python scripts/benchmark_efficiency.py --items 20 --anchors 4 --iterations 3
+      - run: python scripts/benchmark_scaling.py --items 20 --anchors 4 --iterations 3
