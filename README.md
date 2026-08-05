@@ -12,7 +12,6 @@ The default optimization mode is **hierarchical mirror-style alternating leader‚
 
 ```bash
 pip install -r requirements.txt
-pytest
 ```
 
 ## Demo
@@ -37,15 +36,7 @@ Each seed trains a fresh model; the split is frozen and reused. Results include 
 
 ## Datasets
 
-Raw datasets download on demand. Verify exact source checksums and corrected statistics before reporting:
-
-```bash
-python scripts/verify_dataset.py --dataset movielens --min-user-interactions 5 --min-item-interactions 5
-python scripts/verify_dataset.py --dataset epinions --min-user-interactions 5 --min-item-interactions 5
-python scripts/verify_dataset.py --dataset gowalla --min-user-interactions 15 --min-item-interactions 20
-```
-
-Historical workspace counts were MovieLens 6,034/3,125/574,376, Epinions 20,382/30,989/542,856, and Gowalla 29,495/40,358/2,001,700. Do not reuse them unless the verifier reproduces them for the exact source checksum.
+Raw datasets download on demand. The bundled `demo` dataset is intended for a quick runnable check.
 
 ## Model semantics
 
@@ -67,15 +58,6 @@ Historical workspace counts were MovieLens 6,034/3,125/574,376, Epinions 20,382/
 - UIF using frozen Standard validation DUF/DIF constants
 
 UIF weights are configured by `evaluation.uif_w1/uif_w2`. UIF is a summary indicator, not the sole selection criterion.
-
-## Scalability
-
-The repository implements dense log-domain Sinkhorn and a deterministic landmark backend. It does not claim Nystr√∂m Sinkhorn.
-
-```bash
-python scripts/benchmark_efficiency.py --items 10000 --anchors 256
-python scripts/benchmark_scaling.py --items 10000 --anchors 256
-```
 
 ## Reproducibility
 
