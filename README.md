@@ -16,11 +16,11 @@ https://drive.google.com/drive/folders/1nbI95AFsZG2Oq0cZAYVEBKK8spGpqJ3p?usp=sha
 
 Place the downloaded files under the corresponding directories in `data/`.
 
-| Dataset | Users | Items | Interactions | Sparsity | Train | Validation | Test |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| MovieLens | 6,034 | 3,125 | 574,376 | 96.9539% | 562,308 | 6,034 | 6,034 |
-| Epinions | 20,382 | 30,989 | 542,856 | 99.9141% | 502,092 | 20,382 | 20,382 |
-| Gowalla | 29,495 | 40,358 | 2,001,700 | 99.8318% | 1,942,710 | 29,495 | 29,495 |
+| Dataset | Users | Items | Interactions | Sparsity |
+|---|---:|---:|---:|---:|
+| MovieLens | 6,034 | 3,125 | 574,376 | 96.9539% |
+| Epinions | 20,382 | 30,989 | 542,856 | 99.9141% |
+| Gowalla | 29,495 | 40,358 | 2,001,700 | 99.8318% |
 
 A small runnable dataset is included at `data/demo/interactions.csv`.
 
