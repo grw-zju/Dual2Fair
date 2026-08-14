@@ -103,12 +103,7 @@ Hard Matching replaces globally constrained soft OT with independent target-prio
 
 ### Baselines
 
-Local baseline adapters are registered under `baseline/`. ESAM and MGL are supported through provenance-checked external official-code wrappers rather than simplified local surrogates:
-
-- ESAM: `https://github.com/A-bone1/ESAM`
-- MGL: `https://github.com/weicy15/MGL`
-
-Set `baseline.esam.repo_path` or `baseline.mgl.repo_path` to a local official checkout and configure `baseline.<method>.command` before running these wrappers.
+Local baseline adapters are registered under `baseline/`. Some baselines require external official-code wrappers; configure the corresponding `baseline.<method>` fields only when running those methods.
 
 ### Efficiency and Analysis
 
