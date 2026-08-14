@@ -33,6 +33,13 @@ baseline:
     alpha_adv: 0.01
     lambda_dpr: 0.1
     reg_s: 0.0001
+  esam:
+    official_repo: https://github.com/A-bone1/ESAM
+    paper_title: "ESAM: Discriminative Domain Adaptation with Non-Displayed Items to Improve Long-Tail Performance"
+    repo_path: null
+    expected_commit: null
+    command: null
+    output_root: external_baseline_runs
   fair:
     eta: 0.01
     lambda_item: 0.1
@@ -45,6 +52,13 @@ baseline:
   multifr:
     lambda_item: 0.1
     lambda_user: 0.1
+  mgl:
+    official_repo: https://github.com/weicy15/MGL
+    paper_title: "Meta Graph Learning for Long-tail Recommendation"
+    repo_path: null
+    expected_commit: null
+    command: null
+    output_root: external_baseline_runs
   popularity_ips:
     alpha: 0.5
     max_weight: 10.0
@@ -55,46 +69,72 @@ dataset:
     min_item_interactions: 1
     min_user_interactions: 3
   epinions:
-    min_item_interactions: 5
-    min_user_interactions: 5
+    min_item_interactions: 1
+    min_user_interactions: 3
   gowalla:
-    min_item_interactions: 20
-    min_user_interactions: 15
+    min_item_interactions: 1
+    min_user_interactions: 3
   movielens:
-    min_item_interactions: 5
-    min_user_interactions: 5
+    min_item_interactions: 1
+    min_user_interactions: 3
 dual2fair:
-  adv_ratio: 0.05
-  fusion_alpha: 0.5
-  rho_u: 0.5
-  rho_v: 0.5
-  n_clusters: 64
-  sinkhorn_epsilon: 0.1
+  eps0: 1.0e-8
+  log_eps: 1.0e-20
+  sparse_user_ratio: 0.95
+  gmm_clusters: 64
+  gmm_max_iter: 50
+  gmm_tol: 1.0e-4
+  gmm_covariance_floor: 1.0e-6
+  rho_u_init: -2.0
+  rho_v_init: -2.0
+  epsilon_u: 0.1
+  epsilon_v: 0.1
+  tau_u: 0.2
+  tau_v: 0.2
+  kappa: 1.0
+  beta_pop: 0.5
+  delta_m: 1.0e-6
+  omega: 0.2
+  ema_decay: 0.99
+  training_candidate_size: 500
+  calibration_refresh_epochs: 1
+  user_kernel_chunk_size: 4096
+  nystrom_initial_rank: 32
+  nystrom_max_rank: 256
+  nystrom_tol: 1.0e-3
+  nystrom_num_strata: 5
+  nystrom_pinv_rtol: 1.0e-6
   sinkhorn_max_iter: 100
-  sinkhorn_convergence_tol: 0.001
-  transport_backend: landmark
-  item_target_mode: merit_uniform_mixture
-  merit_uniform_gamma: 0.5
-  max_ot_items: 4096
-  item_anchor_count: 256
-  user_chunk_size: 4096
-  ot_update_interval: 1
-  merit_user_sample_size: 1024
-  merit_item_sample_size: 2048
-  merit_user_batch_size: 64
-  optimization_mode: mirror_alternating
-  bilevel_beta: 3
+  sinkhorn_tol: 1.0e-3
+  fairness_learning_rate: 5.0e-4
+  mirror_interval: 3
   mirror_alpha1: 1.0
   mirror_alpha2: 0.1
+  enable_user_calibration: true
+  enable_item_calibration: true
+  enable_confidence: true
+  alignment_mode: ot
+  optimization_strategy: hierarchical_mirror
 evaluation:
-  adv_ratio: 0.05
-  dif_mode: affine_invariant
-  max_full_eval_scores: 50000000
-  n_neg_sampled: 99
-  num_repeats: 1
+  mode: full
+  require_uif_reference: true
+  user_batch_size: 64
   top_k: 10
   uif_w1: 0.5
   uif_w2: 0.5
+  uif_references:
+    val:
+      DUF: null
+      DIF: null
+    test:
+      DUF: null
+      DIF: null
+  seeds:
+  - 42
+  - 43
+  - 44
+  - 45
+  - 46
 seeds:
   data_split: 2026
   negative_sampling: 42

@@ -312,11 +312,20 @@ class Dataset:
         return sp.coo_matrix((values, (users, items)),
                              shape=(self.n_users, self.n_items)).tocsr()
 
+    def get_user_activity_groups(self, sparse_user_ratio=0.95):
+        if not 0.0 < sparse_user_ratio < 1.0:
+            raise ValueError('sparse_user_ratio must be between zero and one')
+        ordered = sorted(range(self.n_users),
+                         key=lambda user: (self.user_freq.get(user, 0), user))
+        n_sparse = min(len(ordered) - 1,
+                       max(1, int(len(ordered) * sparse_user_ratio)))
+        return ordered[n_sparse:], ordered[:n_sparse]
+
     def get_advantaged_users(self, adv_ratio=0.05):
-        frequencies = sorted(self.user_freq.items(), key=lambda pair: (-pair[1], pair[0]))
-        n_advantaged = max(1, int(len(frequencies) * adv_ratio))
-        return ([user for user, _ in frequencies[:n_advantaged]],
-                [user for user, _ in frequencies[n_advantaged:]])
+        import warnings
+        warnings.warn('get_advantaged_users is deprecated; use get_user_activity_groups',
+                      DeprecationWarning, stacklevel=2)
+        return self.get_user_activity_groups(1.0 - adv_ratio)
 
     def get_hot_cold_items(self, hot_ratio=0.2):
         frequencies = sorted(self.item_freq.items(), key=lambda pair: (-pair[1], pair[0]))

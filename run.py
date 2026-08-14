@@ -7,7 +7,6 @@ import numpy as np
 import random
 import time
 import json
-import math
 import copy
 from collections import defaultdict
 
@@ -18,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data.dataset_utils import Dataset, load_dataset
 from models.backbone import get_backbone, NeuMF, VAECF, LightGCN
 from models.dual2fair import Dual2Fair
-from models.dual2fair.optimization import MirrorAlternatingOptimizer
+from models.dual2fair.hierarchical_opt import HierarchicalAlternatingOptimizer
 from evaluation.evaluator import Evaluator
 from baseline import BASELINES, CATEGORIES, PROCESSING_TYPES
 
@@ -86,18 +85,15 @@ def get_device(gpu_id=0):
 
 def _make_evaluator(dataset, config, device, split='test'):
     eval_config = config.get('evaluation', {})
-    evaluator = Evaluator(dataset, k=eval_config.get('top_k', 10),
-                          num_repeats=eval_config.get('num_repeats', 1),
-                          n_neg_sampled=eval_config.get('n_neg_sampled', 99),
-                          device=device, split=split,
-                          max_full_eval_scores=eval_config.get('max_full_eval_scores', 50000000),
-                          dif_mode=eval_config.get('dif_mode', 'affine_invariant'),
-                          uif_w1=eval_config.get('uif_w1', 0.5),
-                          uif_w2=eval_config.get('uif_w2', 0.5))
-    evaluator.set_baseline(None,
-                           eval_config.get('baseline_duf'),
-                           eval_config.get('baseline_dif'))
-    return evaluator
+    references = eval_config.get('uif_references', {}).get(split, {})
+    return Evaluator(
+        dataset, k=eval_config.get('top_k', 10), device=device, split=split,
+        user_batch_size=eval_config.get('user_batch_size', 64),
+        baseline_duf=references.get('DUF'), baseline_dif=references.get('DIF'),
+        uif_w1=eval_config.get('uif_w1', 0.5),
+        uif_w2=eval_config.get('uif_w2', 0.5),
+        eps0=config.get('dual2fair', {}).get('eps0', 1e-8),
+        require_uif_reference=eval_config.get('require_uif_reference', True))
 
 
 def init_backbone(backbone_name, dataset, config, device):
@@ -233,7 +229,7 @@ def train_epoch_vaecf(backbone, dataset, optimizer, device, batch_size=512, clip
     return total_loss / max(1, n_batches)
 
 
-def evaluate_model(backbone, evaluator, backbone_name, eval_mode='sampled'):
+def evaluate_model(backbone, evaluator, backbone_name, eval_mode='full'):
     backbone.eval()
     if backbone_name == 'lightgcn':
         backbone._update_cache()
@@ -243,7 +239,7 @@ def evaluate_model(backbone, evaluator, backbone_name, eval_mode='sampled'):
         return evaluator.evaluate(model=backbone)
 
 
-def evaluate_embeddings_or_model(evaluator, eval_mode='sampled', model=None,
+def evaluate_embeddings_or_model(evaluator, eval_mode='full', model=None,
                                  user_embeddings=None, item_embeddings=None):
     if eval_mode == 'sampled':
         return evaluator.sampled_evaluate(model=model,
@@ -286,7 +282,7 @@ def compute_baseline_fair_loss(baseline_name, baseline_obj, backbone, dataset,
     return torch.tensor(0.0, device=user_embs.device)
 
 
-def train_standard(dataset, backbone_name, config, device, eval_mode='sampled',
+def train_standard(dataset, backbone_name, config, device, eval_mode='full',
                    loss_type='bce', save_path=None):
     backbone = init_backbone(backbone_name, dataset, config, device)
     backbone._backbone_name_hint = backbone_name
@@ -362,175 +358,112 @@ def train_standard(dataset, backbone_name, config, device, eval_mode='sampled',
 
 
 def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2=0.1,
-                    eval_mode='sampled', loss_type='bpr', save_path=None):
+                    eval_mode='full', loss_type='bpr', save_path=None):
     backbone = init_backbone(backbone_name, dataset, config, device)
     backbone._backbone_name_hint = backbone_name
-    d2f_config = dict(config.get('dual2fair', {}))
-    d2f_config.update({'lambda1': lambda1, 'lambda2': lambda2})
-    full_config = dict(config)
-    full_config['dual2fair'] = d2f_config
-    model = Dual2Fair(backbone, dataset, full_config, device, backbone_name)
-
-    model_config = config.get('model', {})
-    learning_rate = model_config.get('learning_rate', 0.001)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
-                                 weight_decay=model_config.get('weight_decay', 1e-5))
-    val_evaluator = _make_evaluator(dataset, config, device, split='val')
-    test_evaluator = _make_evaluator(dataset, config, device, split='test')
-    mode = d2f_config.get('optimization_mode', 'mirror_alternating')
-    if mode not in {'joint_weighted_sum', 'alternating', 'mirror_alternating'}:
-        raise ValueError(f'Unsupported optimization mode: {mode}')
-    mirror = MirrorAlternatingOptimizer(
-        alpha1=d2f_config.get('mirror_alpha1', 1.0),
-        alpha2=d2f_config.get('mirror_alpha2', 0.1),
-        interval=d2f_config.get('bilevel_beta', 3), learning_rate=learning_rate,
-        clip_norm=model_config.get('gradient_clip_val', 1.0))
-
+    model = Dual2Fair(backbone, dataset, config, device, backbone_name).to(device)
+    settings = config['dual2fair']
+    model_config = config['model']
+    controller = HierarchicalAlternatingOptimizer(
+        model, accuracy_learning_rate=model_config.get('learning_rate', 1e-3),
+        fairness_learning_rate=settings['fairness_learning_rate'],
+        mirror_interval=settings['mirror_interval'],
+        mirror_alpha1=settings['mirror_alpha1'],
+        mirror_alpha2=settings['mirror_alpha2'],
+        weight_decay=model_config.get('weight_decay', 0.0))
+    val_evaluator = _make_evaluator(dataset, config, device, 'val')
+    test_evaluator = _make_evaluator(dataset, config, device, 'test')
     max_epochs = model_config.get('max_epochs', 200)
     patience_limit = model_config.get('early_stop_patience', 50)
     batch_size = model_config.get('batch_size', 4096)
-    clip_norm = model_config.get('gradient_clip_val', 1.0)
-    update_interval = max(1, d2f_config.get('ot_update_interval', 1))
-    best_ndcg = float('-inf')
-    best_results = None
-    best_checkpoint = None
-    patience = 0
-    global_step = 0
-
+    refresh_epochs = settings['calibration_refresh_epochs']
+    strategy = settings.get('optimization_strategy', 'hierarchical_mirror')
+    validation_trajectory = []
+    best_ndcg, best_results, best_checkpoint = float('-inf'), None, None
+    patience = iteration = 0
+    model.refresh_calibration_state()
     for epoch in range(max_epochs):
         model.train()
-        if epoch % update_interval == 0 or model.last_output is None:
-            model.clear_calibration_state()
-            model.update_calibration_state()
         if backbone_name == 'vaecf':
             users = torch.randperm(dataset.n_users)
             batches = [(users[start:start + batch_size].to(device), None, None)
                        for start in range(0, len(users), batch_size)]
         elif loss_type == 'bce':
-            users, items, labels = sample_bce_negatives(
-                dataset, model_config.get('n_neg_bce', 4))
-            permutation = torch.randperm(len(users))
-            users, items, labels = users[permutation], items[permutation], labels[permutation]
+            users, items, labels = sample_bce_negatives(dataset, model_config.get('n_neg_bce', 4))
             batches = [(users[start:start + batch_size].to(device),
                         items[start:start + batch_size].to(device),
                         labels[start:start + batch_size].to(device))
                        for start in range(0, len(users), batch_size)]
         else:
-            users, positive, negative = sample_negatives(
-                dataset, model_config.get('n_neg', 1))
-            permutation = torch.randperm(len(users))
-            users, positive, negative = users[permutation], positive[permutation], negative[permutation]
+            users, positive, negative = sample_negatives(dataset, model_config.get('n_neg', 1))
             batches = [(users[start:start + batch_size].to(device),
                         positive[start:start + batch_size].to(device),
                         negative[start:start + batch_size].to(device))
                        for start in range(0, len(users), batch_size)]
-
-        recommendation_total = user_total = item_total = 0.0
         for first, second, third in batches:
-            def recommendation_closure():
-                model.refresh_scoring_state()
+            def accuracy_loss():
+                model.build_calibrated_embeddings()
                 if backbone_name == 'vaecf':
-                    backbone.update_count += 1
-                    return model.vaecf_reconstruction_loss(first)
-                return (model.bce_loss(first, second, third) if loss_type == 'bce'
-                        else model.bpr_loss(first, second, third))
-
-            def fairness_closure():
-                user_loss, item_loss = model.training_fairness_losses()
-                return lambda1 * user_loss + lambda2 * item_loss
-
-            if mode == 'joint_weighted_sum':
-                optimizer.zero_grad()
-                recommendation_loss = recommendation_closure()
-                user_loss, item_loss = model.training_fairness_losses(refresh=False)
-                total = recommendation_loss + lambda1 * user_loss + lambda2 * item_loss
-                total.backward()
-                if clip_norm > 0:
-                    clip_gradients(model, clip_norm)
-                optimizer.step()
-                model.clear_calibration_state()
-            elif mode == 'alternating':
-                optimizer.zero_grad()
-                recommendation_loss = recommendation_closure()
-                recommendation_loss.backward()
-                if clip_norm > 0:
-                    clip_gradients(model, clip_norm)
-                optimizer.step()
-                model.clear_calibration_state()
-                optimizer.zero_grad()
-                user_loss, item_loss = model.training_fairness_losses()
-                (lambda1 * user_loss + lambda2 * item_loss).backward()
-                if clip_norm > 0:
-                    clip_gradients(model, clip_norm)
-                optimizer.step()
-                model.clear_calibration_state()
-            else:
-                recommendation_loss, _, _ = mirror.step(
-                    model, optimizer, recommendation_closure, fairness_closure)
-                with torch.no_grad():
-                    user_loss, item_loss = model.training_fairness_losses()
-            recommendation_total += float(recommendation_loss.detach().cpu())
-            user_total += float(user_loss.detach().cpu())
-            item_total += float(item_loss.detach().cpu())
-            global_step += 1
-
+                    rows = torch.stack([backbone._get_interact_batch(int(user), int(user)+1)[0]
+                                        for user in first.cpu().tolist()]).to(device)
+                    mean, logvar = backbone._encode(rows)
+                    logits = model.scoring_state['calibrated_user_repr'][first] @ model.scoring_state['calibrated_item_repr'].T + backbone.get_item_bias()
+                    rec_loss = -torch.sum(rows * torch.log_softmax(logits, 1)) / len(rows) + backbone.kl_loss(mean, logvar) / len(rows)
+                else:
+                    rec_loss = (model.bce_loss(first, second, third) if loss_type == 'bce'
+                                else model.bpr_loss(first, second, third))
+                if strategy == 'joint_weighted_sum':
+                    rec_loss = rec_loss + lambda1 * model.compute_user_fixed_coupling_loss() + lambda2 * model.compute_item_fixed_coupling_loss()
+                return rec_loss
+            controller.step_iteration(accuracy_loss)
+            iteration += 1
+        if (epoch + 1) % refresh_epochs == 0:
+            model.refresh_calibration_state()
+            if strategy != 'joint_weighted_sum':
+                controller.refresh_correction(lambda1, lambda2, strategy)
         model.eval()
-        model.clear_calibration_state()
-        model.update_calibration_state()
-        results = evaluate_embeddings_or_model(val_evaluator, eval_mode, model=model)
-        print(f"[Dual2Fair/{backbone_name}] Epoch {epoch + 1}: "
-              f"loss={recommendation_total / max(1, len(batches)):.4f}, "
-              f"L_user={user_total / max(1, len(batches)):.4f}, "
-              f"L_item={item_total / max(1, len(batches)):.4f}, "
-              f"NDCG={results['NDCG']:.4f}")
-        if results['NDCG'] > best_ndcg:
-            best_ndcg = results['NDCG']
-            best_results = dict(results)
+        model.build_calibrated_embeddings()
+        results = val_evaluator.evaluate(model=model)
+        selected = results['NDCG'] > best_ndcg
+        if selected:
+            for entry in validation_trajectory:
+                entry['selected_checkpoint'] = False
+        trajectory_entry = {
+            'epoch': epoch + 1,
+            'validation_NDCG': results['NDCG'],
+            'validation_DUF': results['DUF'],
+            'validation_DIF': results['DIF'],
+            'validation_UIF': results.get('UIF'),
+            'strategy': strategy,
+            'seed': config.get('seeds', {}).get('model'),
+            'selected_checkpoint': selected}
+        validation_trajectory.append(trajectory_entry)
+        print(f"[Dual2Fair/{backbone_name}] Epoch {epoch+1}: "
+              f"NDCG={results['NDCG']:.4f}, DUF={results['DUF']:.6f}, "
+              f"DIF={results['DIF']:.6f}, UIF={results.get('UIF')}")
+        if selected:
+            best_ndcg, best_results, patience = results['NDCG'], dict(results), 0
             best_checkpoint = copy.deepcopy(model.checkpoint_state(
-                optimizer=optimizer, epoch=epoch + 1, global_step=global_step))
-            patience = 0
+                controller.accuracy_optimizer, controller.fairness_optimizer,
+                epoch + 1, iteration, {'validation': best_results}))
             if save_path:
                 torch.save(best_checkpoint, save_path)
         else:
             patience += 1
         if patience >= patience_limit:
             break
-
     if best_checkpoint is None:
-        raise RuntimeError('Dual2Fair training produced no checkpoint')
-    model_state = best_checkpoint['model']
-    dynamic_buffers = {
-        'user_calibration.gmm_weights': (model.user_calibration, 'gmm_weights'),
-        'user_calibration.gmm_covariances': (model.user_calibration, 'gmm_covariances'),
-        'user_calibration.prototypes': (model.user_calibration, 'prototypes'),
-        'user_calibration.cached_gamma_u': (model.user_calibration, 'cached_gamma_u'),
-        'user_calibration.cached_user_ids': (model.user_calibration, 'cached_user_ids'),
-        'item_calibration.anchor_indices': (model.item_calibration, 'anchor_indices'),
-        'item_calibration.target_distribution': (model.item_calibration, 'target_distribution'),
-        'item_calibration.cached_item_projection': (model.item_calibration, 'cached_item_projection'),
-    }
-    for key, (module, name) in dynamic_buffers.items():
-        if key in model_state:
-            setattr(module, name, torch.empty_like(model_state[key], device=device))
-    model.load_state_dict(model_state)
-    model.eval()
-    model.calibration_state = None
-    model.last_output = None
-    if hasattr(backbone, '_clear_cache'):
-        backbone._clear_cache()
-    model.refresh_scoring_state()
-    test_results = evaluate_embeddings_or_model(test_evaluator, eval_mode, model=model)
-    first_scores = model.compute_all_scores().detach()
-    second_scores = model.compute_all_scores().detach()
-    if not torch.allclose(first_scores, second_scores, atol=1e-6, rtol=1e-6):
-        raise RuntimeError('Restored Dual2Fair inference is not deterministic')
+        raise RuntimeError('No Dual2Fair checkpoint selected')
+    model.load_checkpoint_state(best_checkpoint)
+    model.eval(); model.build_calibrated_embeddings()
+    test_results = test_evaluator.evaluate(model=model)
+    output = model.build_calibrated_embeddings()
     model._best_validation_results = best_results
-    users, items = model.get_calibrated_embeddings()
-    return model, users.detach().cpu().numpy(), items.detach().cpu().numpy(), best_ndcg, test_results
-
+    model._validation_trajectory = validation_trajectory
+    return model, output.calibrated_user_representations.detach().cpu().numpy(), output.calibrated_item_representations.detach().cpu().numpy(), best_ndcg, test_results
 
 def train_inprocessing_baseline(dataset, backbone_name, baseline_name, config, device,
-                                eval_mode='sampled', loss_type='bce', save_path=None):
+                                eval_mode='full', loss_type='bce', save_path=None):
     backbone = init_backbone(backbone_name, dataset, config, device)
     backbone._backbone_name_hint = backbone_name
 
@@ -540,8 +473,8 @@ def train_inprocessing_baseline(dataset, backbone_name, baseline_name, config, d
     lr = model_config.get('learning_rate', 0.001)
     embedding_dim = model_config.get('embedding_dim', 64)
 
-    adv_users, disadv_users = dataset.get_advantaged_users(
-        eval_config.get('adv_ratio', 0.05))
+    adv_users, disadv_users = dataset.get_user_activity_groups(
+        config.get('dual2fair', {}).get('sparse_user_ratio', 0.95))
     hot_items, cold_items = dataset.get_hot_cold_items()
 
     baseline_cls = BASELINES[baseline_name]
@@ -739,7 +672,7 @@ def train_inprocessing_baseline(dataset, backbone_name, baseline_name, config, d
 
 
 def train_postprocessing_baseline(dataset, backbone_name, baseline_name, config, device,
-                                  eval_mode='sampled', loss_type='bce', save_path=None):
+                                  eval_mode='full', loss_type='bce', save_path=None):
     backbone = init_backbone(backbone_name, dataset, config, device)
     backbone._backbone_name_hint = backbone_name
 
@@ -805,8 +738,8 @@ def train_postprocessing_baseline(dataset, backbone_name, baseline_name, config,
     baseline_cls = BASELINES[baseline_name]
     eval_config = config.get('evaluation', {})
     baseline_config = config.get('baseline', {}).get(baseline_name, {})
-    adv_users, disadv_users = dataset.get_advantaged_users(
-        eval_config.get('adv_ratio', 0.05))
+    adv_users, disadv_users = dataset.get_user_activity_groups(
+        config.get('dual2fair', {}).get('sparse_user_ratio', 0.95))
     hot_items, cold_items = dataset.get_hot_cold_items()
     k = eval_config.get('top_k', 10)
 
@@ -818,7 +751,7 @@ def train_postprocessing_baseline(dataset, backbone_name, baseline_name, config,
             user_groups[u] = 'disadvantaged'
         baseline_obj = baseline_cls(k=k, delta=baseline_config.get('delta', 0.05))
         reranked = baseline_obj.rerank(
-            user_embs, item_embs, test_evaluator.test_dict,
+            user_embs, item_embs, test_evaluator.heldout,
             dataset.user_items, user_groups, k=k, device=device)
     elif baseline_name == 'cpfair':
         item_groups = {}
@@ -830,14 +763,14 @@ def train_postprocessing_baseline(dataset, backbone_name, baseline_name, config,
                                     k=k,
                                     utility_weight=baseline_config.get('utility_weight', 0.8))
         reranked = baseline_obj.rerank(
-            user_embs, item_embs, test_evaluator.test_dict,
+            user_embs, item_embs, test_evaluator.heldout,
             dataset.user_items, item_groups, k=k)
     elif baseline_name == 'fairsort':
         baseline_obj = baseline_cls(k=k,
                                     min_utility=baseline_config.get('min_utility', 0.8),
                                     search_steps=baseline_config.get('search_steps', 6))
         reranked = baseline_obj.rerank(
-            user_embs, item_embs, test_evaluator.test_dict,
+            user_embs, item_embs, test_evaluator.heldout,
             dataset.user_items, k=k)
     else:
         reranked = {}
@@ -845,37 +778,45 @@ def train_postprocessing_baseline(dataset, backbone_name, baseline_name, config,
     if eval_mode == 'sampled':
         from evaluation.metrics import compute_duf, compute_uif
         sampled_candidates = build_sampled_candidates(
-            test_evaluator.test_dict, test_evaluator.test_neg_items,
+            test_evaluator.heldout, dataset.get_test_neg_items(),
             dataset.user_items, dataset.n_items, eval_config.get('n_neg_sampled', 99))
         ndcg_scores_full, mean_ndcg, mean_hit = compute_sampled_metrics_from_reranked(
             reranked, sampled_candidates, user_embs, item_embs, k)
         dif_val = compute_sampled_dif_from_reranked_embeddings(
             reranked, sampled_candidates, user_embs, item_embs, k)
         duf_val = compute_duf(ndcg_scores_full)
+        test_refs = eval_config.get('uif_references', {}).get('test', {})
+        uif_val = None
+        if test_refs.get('DUF') is not None and test_refs.get('DIF') is not None:
+            uif_val = compute_uif(ndcg_scores_full, dif_val,
+                              baseline_duf=test_refs.get('DUF'),
+                              baseline_dif=test_refs.get('DIF'),
+                              w1=eval_config.get('uif_w1', 0.5),
+                              w2=eval_config.get('uif_w2', 0.5))
         final_results = {
             'NDCG': mean_ndcg, 'Hit': mean_hit,
             'DUF': duf_val, 'DIF': dif_val,
-            'UIF': compute_uif(ndcg_scores_full, dif_val,
-                              eval_config.get('uif_w1', 0.5),
-                              eval_config.get('uif_w2', 0.5),
-                              baseline_duf=eval_config.get('baseline_duf'),
-                              baseline_dif=eval_config.get('baseline_dif'))
+            'UIF': uif_val
         }
     else:
         from evaluation.metrics import compute_duf, compute_uif
         ndcg_scores, mean_ndcg, mean_hit = compute_ndcg_full_from_reranked(
-            reranked, test_evaluator.test_dict, k)
+            reranked, test_evaluator.heldout, k)
         dif_val = compute_dif_from_reranked_embeddings(
-            reranked, user_embs, item_embs, test_evaluator.test_dict, dataset.user_items, k)
+            reranked, user_embs, item_embs, test_evaluator.heldout, dataset.user_items, k)
         duf_val = compute_duf(ndcg_scores)
+        test_refs = eval_config.get('uif_references', {}).get('test', {})
+        uif_val = None
+        if test_refs.get('DUF') is not None and test_refs.get('DIF') is not None:
+            uif_val = compute_uif(ndcg_scores, dif_val,
+                              baseline_duf=test_refs.get('DUF'),
+                              baseline_dif=test_refs.get('DIF'),
+                              w1=eval_config.get('uif_w1', 0.5),
+                              w2=eval_config.get('uif_w2', 0.5))
         final_results = {
             'NDCG': mean_ndcg, 'Hit': mean_hit,
             'DUF': duf_val, 'DIF': dif_val,
-            'UIF': compute_uif(ndcg_scores, dif_val,
-                              eval_config.get('uif_w1', 0.5),
-                              eval_config.get('uif_w2', 0.5),
-                              baseline_duf=eval_config.get('baseline_duf'),
-                              baseline_dif=eval_config.get('baseline_dif'))
+            'UIF': uif_val
         }
 
     print(f"[{baseline_name}] Best val: {best_backbone_results}")
@@ -952,86 +893,57 @@ def compute_sampled_metrics_from_reranked(reranked_lists, sampled_candidates,
     return ndcg_scores, mean_ndcg, mean_hit
 
 
-def compute_dif_from_reranked_lists(reranked_lists, all_scores, test_dict, train_user_items, k=10):
-    from evaluation.metrics import compute_dif_from_ranked_lists
-    return compute_dif_from_ranked_lists(reranked_lists, all_scores, test_dict, train_user_items, k)
+def compute_rank_dif_from_reranked(reranked_lists, test_dict, n_items, k=10, eps0=1e-8):
+    from evaluation.metrics import compute_rank_dif
+    exposure = np.zeros(n_items, dtype=np.float64)
+    relevance = np.zeros(n_items, dtype=np.float64)
+    evaluated = np.zeros(n_items, dtype=bool)
+    for uid in test_dict:
+        ranked = reranked_lists.get(int(uid), [])
+        if not len(ranked):
+            continue
+        ranked = np.asarray(ranked, dtype=np.int64)
+        ranked = ranked[ranked < n_items]
+        if not len(ranked):
+            continue
+        exposure[ranked[:k]] += 1.0
+        count = len(ranked)
+        relevance[ranked] += (count - np.arange(1, count + 1) + 1) / count
+        evaluated[ranked] = True
+    return compute_rank_dif(exposure, relevance, evaluated, eps0)
 
 
 def compute_dif_from_reranked_embeddings(reranked_lists, user_embs, item_embs, test_dict,
-                                         train_user_items, k=10):
-    epsilon = 1e-10
+                                         train_user_items, k=10, eps0=1e-8):
     n_items = item_embs.shape[0]
-    exposure = np.zeros(n_items)
-    quality = np.zeros(n_items)
-    item_embs_t = torch.from_numpy(item_embs).float() if isinstance(item_embs, np.ndarray) else item_embs
-    user_embs_t = torch.from_numpy(user_embs).float() if isinstance(user_embs, np.ndarray) else user_embs
-
-    with torch.no_grad():
-        for uid in test_dict.keys():
-            candidate_items = list(reranked_lists.get(uid, [])[:k])
-            true_item = test_dict[uid]
-            if isinstance(true_item, (int, np.integer)):
-                candidate_items.append(int(true_item))
-            else:
-                candidate_items.extend(list(true_item))
-            candidate_items = [i for i in dict.fromkeys(candidate_items) if i < n_items]
-            if not candidate_items:
-                continue
-            scores = (item_embs_t[candidate_items] @ user_embs_t[uid]).cpu().numpy()
-            probs = 1.0 / (1.0 + np.exp(-np.clip(scores, -30, 30)))
-            for item in reranked_lists.get(uid, [])[:k]:
-                if item < n_items:
-                    exposure[item] += 1
-            for local_idx, item in enumerate(candidate_items):
-                quality[item] += probs[local_idx]
-
-    observed = quality > 0
-    if not np.any(observed):
-        return 0.0
-    eq_ratio = exposure[observed] / (quality[observed] + epsilon)
-    return np.mean((eq_ratio - eq_ratio.mean()) ** 2)
+    return compute_rank_dif_from_reranked(reranked_lists, test_dict, n_items, k, eps0)
 
 
 def compute_sampled_dif_from_reranked_embeddings(reranked_lists, sampled_candidates,
-                                                 user_embs, item_embs, k=10):
-    epsilon = 1e-10
-    n_items = item_embs.shape[0]
-    exposure = np.zeros(n_items)
-    quality = np.zeros(n_items)
-    item_embs_t = torch.from_numpy(item_embs).float() if isinstance(item_embs, np.ndarray) else item_embs
-    user_embs_t = torch.from_numpy(user_embs).float() if isinstance(user_embs, np.ndarray) else user_embs
+                                                 user_embs, item_embs, k=10, eps0=1e-8):
+    import warnings
+    warnings.warn('sampled DIF is deprecated; use full-catalog rank-based DIF', DeprecationWarning)
+    return compute_rank_dif_from_reranked(reranked_lists, sampled_candidates, item_embs.shape[0], k, eps0)
 
-    with torch.no_grad():
-        for uid, eval_items in sampled_candidates.items():
-            eval_items = [item for item in eval_items if item < n_items]
-            if not eval_items:
-                continue
-            model_scores = (item_embs_t[eval_items] @ user_embs_t[uid]).cpu().numpy()
-            eval_set = set(eval_items)
-            selected = [item for item in reranked_lists.get(uid, []) if item in eval_set]
-            score_by_item = {item: float(score) for item, score in zip(eval_items, model_scores)}
-            remaining = [item for item in eval_items if item not in selected]
-            remaining.sort(key=lambda item: score_by_item[item], reverse=True)
-            final_rank = selected + remaining
-            rank_pos = {item: pos for pos, item in enumerate(final_rank)}
-            rank_scores = np.array([-rank_pos[item] for item in eval_items], dtype=np.float32)
-            top_k_idx = np.argsort(-rank_scores)[:k]
-            probs = 1.0 / (1.0 + np.exp(-np.clip(model_scores, -30, 30)))
-            for local_idx in top_k_idx:
-                exposure[eval_items[local_idx]] += 1
-            for local_idx, item in enumerate(eval_items):
-                quality[item] += probs[local_idx]
 
-    observed = quality > 0
-    if not np.any(observed):
-        return 0.0
-    eq_ratio = exposure[observed] / (quality[observed] + epsilon)
-    return np.mean((eq_ratio - eq_ratio.mean()) ** 2)
+def train_external_baseline(dataset, baseline_name, config, device):
+    baseline_config = config.get('baseline', {}).get(baseline_name, {})
+    baseline = BASELINES[baseline_name](baseline_config)
+    val_evaluator = _make_evaluator(dataset, config, device, split='val')
+    test_evaluator = _make_evaluator(dataset, config, device, split='test')
+    results = baseline.run(dataset, val_evaluator, test_evaluator)
+    return baseline, results
 
 
 def train_baseline(dataset, backbone_name, baseline_name, config, device,
-                   eval_mode='sampled', loss_type='bce', save_path=None):
+                   eval_mode='full', loss_type='bce', save_path=None):
     proc_type = PROCESSING_TYPES.get(baseline_name, 'in-processing')
+    if proc_type == 'external-wrapper':
+        return train_external_baseline(dataset, baseline_name, config, device)
+    if proc_type == 'unavailable-external':
+        raise NotImplementedError(
+            f'{baseline_name} exact implementation is not available locally; '
+            'provide an official adapter before running paper reproduction.')
     if proc_type == 'post-processing':
         return train_postprocessing_baseline(dataset, backbone_name, baseline_name,
                                              config, device, eval_mode, loss_type, save_path)
@@ -1050,10 +962,12 @@ def main():
     parser.add_argument('--method', type=str, default='standard',
                         choices=['standard', 'dual2fair', 'ufr', 'hyperuof', 'dpr',
                                  'fairdual', 'cpfair', 'multifr', 'ada2fair', 'fair',
-                                 'fairsort', 'popularity_ips'])
+                                 'fairsort', 'popularity_ips', 'esam', 'mgl'])
     parser.add_argument('--lambda1', type=float, default=0.1)
     parser.add_argument('--lambda2', type=float, default=0.1)
-    parser.add_argument('--eval_mode', type=str, default='sampled',
+    parser.add_argument('--alignment_mode', type=str, default=None,
+                        choices=['ot', 'hard', 'mmd'])
+    parser.add_argument('--eval_mode', type=str, default='full',
                         choices=['sampled', 'full'])
     parser.add_argument('--loss_type', type=str, default='bpr',
                         choices=['bce', 'bpr'])
@@ -1065,12 +979,20 @@ def main():
     parser.add_argument('--save_dir', type=str, default='saved_models')
     parser.add_argument('--results_dir', type=str, default='results')
     parser.add_argument('--output-suffix', type=str, default='')
+    parser.add_argument('--allow-missing-uif-reference', action='store_true')
     args = parser.parse_args()
 
     set_seed(args.seed)
     config = load_config(args.config)
+    if args.alignment_mode is not None:
+        config.setdefault('dual2fair', {})['alignment_mode'] = args.alignment_mode
+    if args.allow_missing_uif_reference:
+        config.setdefault('evaluation', {})['require_uif_reference'] = False
     if args.seeds:
         import subprocess
+        from scripts.run_five_seeds import aggregate_runs
+        if len(args.seeds) != 5 or len(set(args.seeds)) != 5:
+            raise ValueError('Paper aggregation requires exactly five distinct model seeds')
         aggregate = []
         for model_seed in args.seeds:
             command = [sys.executable, os.path.abspath(__file__), '--dataset', args.dataset,
@@ -1081,18 +1003,20 @@ def main():
                        '--split-seed', str(args.split_seed), '--gpu', str(args.gpu),
                        '--save_dir', args.save_dir, '--results_dir', args.results_dir,
                        '--output-suffix', f'_seed{model_seed}']
+            if args.alignment_mode is not None:
+                command.extend(['--alignment_mode', args.alignment_mode])
+            if args.allow_missing_uif_reference:
+                command.append('--allow-missing-uif-reference')
             subprocess.run(command, check=True)
             result_path = os.path.join(args.results_dir,
                                        f'{args.dataset}_{args.backbone}_{args.method}_seed{model_seed}.json')
             with open(result_path, 'r') as handle:
                 result = json.load(handle)
             aggregate.append(result)
-        numeric = ['NDCG', 'Hit', 'DUF', 'DIF', 'UIF']
-        summary = {'seeds': args.seeds, 'runs': aggregate, 'split_seed': args.split_seed}
-        for key in numeric:
-            values = np.asarray([run[key] for run in aggregate], dtype=float)
-            summary[key] = {'mean': float(values.mean()), 'std': float(values.std(ddof=1)) if len(values) > 1 else 0.0,
-                            'ci95': float(1.96 * values.std(ddof=1) / math.sqrt(len(values))) if len(values) > 1 else 0.0}
+        summary = aggregate_runs(aggregate)
+        summary.update({
+            'split_seed': args.split_seed,
+            'selected_hyperparameters': {'lambda1': args.lambda1, 'lambda2': args.lambda2}})
         summary_path = os.path.join(args.results_dir,
                                     f'{args.dataset}_{args.backbone}_{args.method}_aggregate.json')
         with open(summary_path, 'w') as handle:
@@ -1145,16 +1069,32 @@ def main():
         'split_hash': dataset.split_hash,
         'eval_mode': args.eval_mode,
         'loss_type': args.loss_type,
+        'alignment_mode': config.get('dual2fair', {}).get('alignment_mode'),
+        'mmd_kernel': ('linear' if config.get('dual2fair', {}).get('alignment_mode') == 'mmd'
+                       else None),
+        'ablation_name': ({'hard': 'Hard Matching', 'mmd': 'MMD Alignment',
+                           'ot': 'Dual2Fair'}.get(config.get('dual2fair', {}).get('alignment_mode'))
+                          if args.method == 'dual2fair' else None),
+        'selected_hyperparameters': {'lambda1': args.lambda1, 'lambda2': args.lambda2},
+        'checkpoint_path': save_path,
+        'baseline_processing_type': PROCESSING_TYPES.get(args.method),
     })
+    if hasattr(backbone, '_best_validation_results'):
+        results['validation_results'] = backbone._best_validation_results
+    if hasattr(backbone, '_validation_trajectory'):
+        results['validation_trajectory'] = backbone._validation_trajectory
     results_path = os.path.join(args.results_dir,
                                 f"{args.dataset}_{args.backbone}_{args.method}{args.output_suffix}.json")
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
 
-    print(f"\nFinal Results: NDCG={results.get('NDCG', 0):.4f}, "
-          f"Hit={results.get('Hit', 0):.4f}, "
-          f"DUF={results.get('DUF', 0):.6f}, DIF={results.get('DIF', 0):.6f}, "
-          f"UIF={results.get('UIF', 0):.6f}")
+    metric_parts = [f"NDCG={results.get('NDCG', 0):.4f}",
+                    f"Hit={results.get('Hit', 0):.4f}",
+                    f"DUF={results.get('DUF', 0):.6f}",
+                    f"DIF={results.get('DIF', 0):.6f}"]
+    if results.get('UIF') is not None:
+        metric_parts.append(f"UIF={results['UIF']:.6f}")
+    print("\nFinal Results: " + ", ".join(metric_parts))
     print(f"Results saved to {results_path}")
 
 

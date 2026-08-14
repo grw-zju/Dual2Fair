@@ -1,10 +1,12 @@
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .adapters import get_adapter
 from .item_calibration import ItemRepresentationCalibration
-from .state import CalibrationOutput
+from .state import CalibrationOutput, CalibrationState
 from .user_calibration import UserRepresentationCalibration
 
 
@@ -15,278 +17,276 @@ class Dual2Fair(nn.Module):
         self.dataset = dataset
         self.config = config
         self.device_hint = torch.device(device or 'cpu')
-        name = backbone_name or getattr(backbone, '_backbone_name_hint', None)
-        if name is None:
-            name = backbone.__class__.__name__.lower()
-        self.backbone_name = name
-        self.adapter = get_adapter(name, backbone)
-        settings = config.get('dual2fair', {})
+        self.backbone_name = (backbone_name or getattr(backbone, '_backbone_name_hint', None)
+                              or backbone.__class__.__name__.lower())
+        self.adapter = get_adapter(self.backbone_name, backbone)
+        settings = config['dual2fair']
+        users, items = self.get_native_embeddings()
+        dimension = items.shape[1]
         seed = config.get('seeds', {}).get('ot_sampling', 42)
-        raw_user_repr, raw_item_repr = self._raw_representations()
-        representation_dim = raw_item_repr.shape[1]
         self.user_calibration = UserRepresentationCalibration(
-            epsilon=settings.get('sinkhorn_epsilon', 0.1),
-            rho_u=settings.get('rho_u', settings.get('fusion_alpha', 0.5)),
-            n_clusters=settings.get('n_clusters', 64),
-            user_chunk_size=settings.get('user_chunk_size', 4096),
-            representation_dim=representation_dim,
-            random_state=seed,
-            sinkhorn_max_iter=settings.get('sinkhorn_max_iter', 100),
-            sinkhorn_convergence_tol=settings.get('sinkhorn_convergence_tol', 1e-3),
-            device=self.device_hint)
-        advantaged, disadvantaged = dataset.get_advantaged_users(settings.get('adv_ratio', 0.05))
-        self.user_calibration.set_user_groups(advantaged, disadvantaged, dataset.user_items)
+            dimension, gmm_clusters=settings['gmm_clusters'],
+            gmm_max_iter=settings['gmm_max_iter'], gmm_tol=settings['gmm_tol'],
+            gmm_covariance_floor=settings['gmm_covariance_floor'],
+            rho_u_init=settings['rho_u_init'], epsilon_u=settings['epsilon_u'],
+            tau_u=settings['tau_u'], sinkhorn_max_iter=settings['sinkhorn_max_iter'],
+            sinkhorn_tol=settings['sinkhorn_tol'],
+            user_kernel_chunk_size=settings['user_kernel_chunk_size'],
+            eps0=settings['eps0'], log_eps=settings['log_eps'], random_state=seed)
+        higher, sparse = dataset.get_user_activity_groups(settings['sparse_user_ratio'])
+        self.user_calibration.set_user_groups(higher, sparse, dataset.user_items)
         self.item_calibration = ItemRepresentationCalibration(
-            epsilon=settings.get('sinkhorn_epsilon', 0.1),
-            alpha_smoothing=settings.get('alpha_smoothing', 1.0),
-            beta_scaling=settings.get('beta_scaling', 1.0),
-            sinkhorn_max_iter=settings.get('sinkhorn_max_iter', 100),
-            sinkhorn_convergence_tol=settings.get('sinkhorn_convergence_tol', 1e-3),
-            max_ot_items=settings.get('max_ot_items', 4096),
-            item_anchor_count=settings.get('item_anchor_count', 256),
-            item_target_mode=settings.get('item_target_mode', 'merit_uniform_mixture'),
-            merit_uniform_gamma=settings.get('merit_uniform_gamma', 0.5),
-            rho_v=settings.get('rho_v', 0.5), representation_dim=representation_dim,
-            random_state=seed,
-            device=self.device_hint)
-        self.lambda1 = settings.get('lambda1', 0.1)
-        self.lambda2 = settings.get('lambda2', 0.1)
+            dimension, epsilon_v=settings['epsilon_v'], tau_v=settings['tau_v'],
+            kappa=settings['kappa'], beta_pop=settings['beta_pop'],
+            delta_m=settings['delta_m'], omega=settings['omega'],
+            rho_v_init=settings['rho_v_init'],
+            nystrom_initial_rank=settings['nystrom_initial_rank'],
+            nystrom_max_rank=settings['nystrom_max_rank'],
+            nystrom_tol=settings['nystrom_tol'],
+            nystrom_num_strata=settings['nystrom_num_strata'],
+            nystrom_pinv_rtol=settings['nystrom_pinv_rtol'],
+            sinkhorn_max_iter=settings['sinkhorn_max_iter'],
+            sinkhorn_tol=settings['sinkhorn_tol'], eps0=settings['eps0'],
+            random_state=seed)
+        self.enable_user_calibration = settings.get('enable_user_calibration', True)
+        self.enable_item_calibration = settings.get('enable_item_calibration', True)
+        self.enable_confidence = settings.get('enable_confidence', True)
+        self.alignment_mode = settings.get('alignment_mode', 'ot')
+        if self.alignment_mode not in {'ot', 'hard', 'mmd'}:
+            raise ValueError(f"Unknown alignment_mode: {self.alignment_mode}")
+        self.ema_decay = float(settings['ema_decay'])
+        self.training_candidate_size = int(settings['training_candidate_size'])
+        self.register_buffer('training_candidates', self._build_training_candidates(seed))
+        self.ema_state = {name: parameter.detach().clone()
+                          for name, parameter in self.named_parameters()}
         self.calibration_state = None
-        self.last_output = None
+        self.scoring_state = None
+        self.refresh_index = 0
 
-    def _raw_representations(self):
+    def get_native_embeddings(self):
         return self.adapter.get_raw_user_repr(), self.adapter.get_raw_item_repr()
 
-    def _merit(self, raw_users, raw_items):
-        settings = self.config.get('dual2fair', {})
-        generator = torch.Generator(device='cpu').manual_seed(
-            self.config.get('seeds', {}).get('ot_sampling', 42))
-        n_users = raw_users.shape[0]
-        n_items = raw_items.shape[0]
-        user_count = min(settings.get('merit_user_sample_size', 1024), n_users)
-        item_count = min(settings.get('merit_item_sample_size', 2048), n_items)
-        sampled_users = torch.randperm(n_users, generator=generator)[:user_count].to(raw_users.device)
-        if self.item_calibration.anchor_indices is not None:
-            sampled_items = self.item_calibration.anchor_indices.to(raw_items.device)
-        else:
-            sampled_items = torch.randperm(n_items, generator=generator)[:item_count].to(raw_items.device)
-        merit = torch.ones(n_items, dtype=raw_items.dtype, device=raw_items.device)
-        accumulated = torch.zeros(len(sampled_items), dtype=raw_items.dtype,
-                                  device=raw_items.device)
-        batch_size = settings.get('merit_user_batch_size', 64)
-        state = {
-            'raw_user_repr': raw_users.detach(),
-            'raw_item_repr': raw_items.detach(),
-            'calibrated_user_repr': raw_users.detach(),
-            'calibrated_item_repr': raw_items.detach(),
-        }
+    def _build_training_candidates(self, seed):
+        generator = torch.Generator().manual_seed(int(seed))
+        warm_items = sorted(item for item, frequency in self.dataset.item_freq.items()
+                            if frequency > 0)
+        rows = []
+        for user in range(self.dataset.n_users):
+            pool = [item for item in warm_items
+                    if item not in self.dataset.user_items.get(user, set())]
+            if not pool:
+                rows.append(torch.empty(0, dtype=torch.long))
+                continue
+            count = min(self.training_candidate_size, len(pool))
+            permutation = torch.randperm(len(pool), generator=generator)[:count]
+            rows.append(torch.tensor([pool[index] for index in permutation], dtype=torch.long))
+        width = max(len(row) for row in rows)
+        candidates = torch.full((len(rows), width), -1, dtype=torch.long)
+        for user, row in enumerate(rows):
+            candidates[user, :len(row)] = row
+        return candidates
+
+    def _ema_parameter_context(self):
+        current = {name: parameter.detach().clone()
+                   for name, parameter in self.named_parameters()}
+        self.load_state_dict({**self.state_dict(), **self.ema_state}, strict=False)
+        return current
+
+    def _restore_parameters(self, current):
         with torch.no_grad():
-            for start in range(0, len(sampled_users), batch_size):
-                users = sampled_users[start:start + batch_size]
-                user_ids = users[:, None].expand(-1, len(sampled_items)).reshape(-1)
-                item_ids = sampled_items[None, :].expand(len(users), -1).reshape(-1)
-                scores = self.adapter.score_pairs_with_calibrated_state(
-                    user_ids, item_ids, state).reshape(len(users), len(sampled_items))
-                order = torch.argsort(scores, dim=1)
-                ranks = torch.empty_like(scores)
-                values = torch.arange(1, len(sampled_items) + 1, device=scores.device,
-                                      dtype=scores.dtype).expand_as(scores)
-                ranks.scatter_(1, order, values)
-                accumulated += (ranks / max(1, len(sampled_items))).sum(dim=0)
-        merit[sampled_items] = accumulated / max(1, len(sampled_users))
-        return merit
+            for name, parameter in self.named_parameters():
+                parameter.copy_(current[name])
 
-    def update_calibration_state(self):
-        raw_users, raw_items = self._raw_representations()
-        self.user_calibration.fit_gmm(raw_items.detach())
-        user_loss = self.user_calibration.compute_user_ot_loss(raw_items)
-        frequencies = self.item_calibration._frequency_values(
-            raw_items.shape[0], self.dataset.item_freq, raw_items.dtype, raw_items.device)
-        self.item_calibration.anchor_indices = self.item_calibration._select_anchors(frequencies)
-        merit = self._merit(raw_users, raw_items)
-        self.item_calibration.update_state(raw_items.detach(), self.dataset.item_freq, merit)
-        item_loss = self.item_calibration.compute_item_ot_loss(raw_items, self.dataset.item_freq, merit)
-        calibrated_users = self.user_calibration.calibrate_disadvantaged_users(
-            raw_users, raw_items, refresh=False)
-        calibrated_items, _ = self.item_calibration.calibrate_items(
-            raw_items, self.dataset.item_freq, merit, refresh=False)
-        self.calibration_state = {
-            'raw_user_repr': raw_users,
-            'raw_item_repr': raw_items,
-            'calibrated_user_repr': calibrated_users,
-            'calibrated_item_repr': calibrated_items,
-        }
-        self.last_output = CalibrationOutput(
-            raw_users, raw_items, calibrated_users, calibrated_items,
-            self.user_calibration.cached_gamma_u,
-            self.item_calibration.cached_item_plans[0] if self.item_calibration.cached_item_plans else None,
-            user_ot_objective=user_loss, item_ot_objective=item_loss,
-            fusion_rho_u=self.user_calibration.rho_u,
-            fusion_rho_v=self.item_calibration.rho_v,
-            scorer_state=self.calibration_state)
-        return self.last_output
+    def compute_training_merit(self):
+        merit = torch.zeros(self.dataset.n_items, device=self.device_hint)
+        current = self._ema_parameter_context()
+        try:
+            users, items = self.get_native_embeddings()
+            raw_state = {'raw_user_repr': users, 'raw_item_repr': items,
+                         'calibrated_user_repr': users, 'calibrated_item_repr': items}
+            with torch.no_grad():
+                for user in range(self.dataset.n_users):
+                    candidates = self.training_candidates[user]
+                    candidates = candidates[candidates >= 0].to(users.device)
+                    if not len(candidates):
+                        continue
+                    user_ids = torch.full_like(candidates, user)
+                    scores = self.adapter.score_pairs_with_calibrated_state(
+                        user_ids, candidates, raw_state)
+                    order = torch.argsort(candidates, stable=True)
+                    candidates, scores = candidates[order], scores[order]
+                    ranking = torch.argsort(scores, descending=True, stable=True)
+                    ranks = torch.empty(len(candidates), device=scores.device)
+                    ranks[ranking] = torch.arange(1, len(candidates) + 1,
+                                                  device=scores.device,
+                                                  dtype=scores.dtype)
+                    relevance = (len(candidates) - ranks + 1) / len(candidates)
+                    merit.index_add_(0, candidates, relevance)
+        finally:
+            self._restore_parameters(current)
+        return merit.detach()
 
-    def refresh_scoring_state(self):
-        raw_users, raw_items = self._raw_representations()
-        calibrated_users = self.user_calibration.calibrate_disadvantaged_users(
-            raw_users, raw_items, refresh=False)
-        merit = self._merit(raw_users, raw_items)
-        calibrated_items, _ = self.item_calibration.calibrate_items(
-            raw_items, self.dataset.item_freq, merit, refresh=False)
-        self.calibration_state = {
-            'raw_user_repr': raw_users,
-            'raw_item_repr': raw_items,
-            'calibrated_user_repr': calibrated_users,
-            'calibrated_item_repr': calibrated_items,
-        }
+    def refresh_calibration_state(self):
+        users, items = self.get_native_embeddings()
+        if self.enable_user_calibration:
+            self.user_calibration.refresh(users, items, self.alignment_mode)
+        frequencies = torch.as_tensor(
+            [self.dataset.item_freq.get(item, 0) for item in range(self.dataset.n_items)],
+            dtype=items.dtype, device=items.device)
+        merit = self.compute_training_merit()
+        if self.enable_item_calibration:
+            self.item_calibration.refresh(items, frequencies, merit, self.alignment_mode)
+        self.refresh_index += 1
+        higher = torch.as_tensor(self.user_calibration.higher_activity_users,
+                                 dtype=torch.long, device=users.device)
+        sparse = (self.user_calibration.sparse_user_ids.detach().clone()
+                  if self.enable_user_calibration else higher[:0])
+        user_transport = (self.user_calibration.user_transport
+                          if self.enable_user_calibration else None)
+        user_bary = (self.user_calibration.barycentric_targets()
+                     if self.enable_user_calibration and self.alignment_mode == 'ot'
+                     else (self.user_calibration.alignment_targets
+                           if self.enable_user_calibration else None))
+        user_cal_x = (self.user_calibration.sparse_calibration_x.detach().clone()
+                      if self.enable_user_calibration else None)
+        item_target = (self.item_calibration.target_distribution
+                       if self.enable_item_calibration else None)
+        item_source = (self.item_calibration.source_distribution
+                       if self.enable_item_calibration else None)
+        item_transport = (self.item_calibration.transport_state
+                          if self.enable_item_calibration else None)
+        item_bary = (self.item_calibration.barycentric_targets_cache
+                     if self.enable_item_calibration else None)
+        item_anchors = (self.item_calibration.target_anchors
+                        if self.enable_item_calibration else None)
+        self.calibration_state = CalibrationState(
+            self.refresh_index, higher, sparse,
+            user_transport, item_target, item_transport,
+            user_bary, user_cal_x, item_bary,
+            self.training_candidates.detach().clone(),
+            alignment_mode=self.alignment_mode,
+            user_hard_indices=(self.user_calibration.hard_user_indices
+                               if self.enable_user_calibration else None),
+            item_hard_indices=(self.item_calibration.hard_item_indices
+                               if self.enable_item_calibration else None),
+            user_alignment_state=(self.user_calibration.mmd_state
+                                  if self.enable_user_calibration else None),
+            item_alignment_state=(self.item_calibration.mmd_state
+                                  if self.enable_item_calibration else None),
+            item_source_marginal=item_source,
+            item_target_anchors=item_anchors)
+        self.build_calibrated_embeddings()
         return self.calibration_state
 
-    def training_fairness_losses(self, refresh=True):
-        state = self.refresh_scoring_state() if refresh else self._state()
-        user_ids = self.user_calibration.cached_user_ids
-        if user_ids is None or user_ids.numel() == 0:
-            user_loss = state['raw_user_repr'].sum() * 0.0
-        else:
-            barycenters = self.user_calibration.barycentric_projection(
-                self.user_calibration.cached_gamma_u,
-                self.user_calibration.prototypes.detach())
-            projected = self.user_calibration.projection(barycenters)
-            raw_users = state['raw_user_repr'][user_ids].detach()
-            calibrated_users = (self.user_calibration.rho_u * raw_users
-                                + (1.0 - self.user_calibration.rho_u) * projected)
-            user_loss = (1.0 - F.cosine_similarity(
-                raw_users, calibrated_users, dim=1)).mean()
-        raw_items = state['raw_item_repr'].detach()
-        projected_items = self.item_calibration.projection(
-            self.item_calibration.cached_item_projection.detach())
-        calibrated_items = (self.item_calibration.rho_v * raw_items
-                            + (1.0 - self.item_calibration.rho_v) * projected_items)
-        item_loss = (1.0 - F.cosine_similarity(
-            raw_items, calibrated_items, dim=1)).mean()
-        return user_loss, item_loss
-
-    def _state(self):
-        if self.calibration_state is None:
-            self.update_calibration_state()
-        return self.calibration_state
+    def build_calibrated_embeddings(self, calibration_state=None):
+        users, items = self.get_native_embeddings()
+        calibrated_users = (self.user_calibration.calibrate(
+            users, self.enable_confidence) if self.enable_user_calibration else users)
+        calibrated_items = (self.item_calibration.calibrate(
+            items, self.enable_confidence) if self.enable_item_calibration else items)
+        self.scoring_state = {
+            'raw_user_repr': users, 'raw_item_repr': items,
+            'calibrated_user_repr': calibrated_users,
+            'calibrated_item_repr': calibrated_items}
+        return CalibrationOutput(users, items, calibrated_users, calibrated_items,
+                                 self.calibration_state)
 
     def forward(self, user_ids, item_ids):
-        return self.adapter.score_pairs_with_calibrated_state(user_ids, item_ids, self._state())
+        if self.scoring_state is None:
+            self.refresh_calibration_state()
+        return self.adapter.score_pairs_with_calibrated_state(
+            user_ids, item_ids, self.scoring_state)
 
-    def bpr_loss(self, user_ids, positive_item_ids, negative_item_ids):
-        positive = self.forward(user_ids, positive_item_ids)
-        negative = self.forward(user_ids, negative_item_ids)
-        return -F.logsigmoid(positive - negative).mean()
+    def bpr_loss(self, users, positive_items, negative_items):
+        return -F.logsigmoid(self.forward(users, positive_items)
+                             - self.forward(users, negative_items)).mean()
 
-    def bce_loss(self, user_ids, item_ids, labels):
-        return F.binary_cross_entropy_with_logits(self.forward(user_ids, item_ids), labels.float())
-
-    def vaecf_reconstruction_loss(self, user_ids):
-        if self.backbone_name != 'vaecf':
-            raise TypeError('VAECF reconstruction loss requires the VAECF adapter')
-        state = self._state()
-        logits = (state['calibrated_user_repr'][user_ids]
-                  @ state['calibrated_item_repr'].T
-                  + self.backbone.get_item_bias().unsqueeze(0))
-        rows = self.backbone._get_interact_batch(
-            int(user_ids.min()), int(user_ids.max()) + 1).to(logits.device)
-        if not torch.equal(user_ids, torch.arange(int(user_ids.min()),
-                                                  int(user_ids.max()) + 1,
-                                                  device=user_ids.device)):
-            rows = torch.stack([
-                self.backbone._get_interact_batch(int(user), int(user) + 1)[0]
-                for user in user_ids.cpu().tolist()]).to(logits.device)
-        mean, log_variance = self.backbone._encode(rows)
-        reconstruction = -torch.sum(rows * F.log_softmax(logits, dim=1)) / rows.shape[0]
-        anneal = min(self.backbone.anneal_cap,
-                     self.backbone.update_count / self.backbone.total_anneal_steps)
-        return reconstruction + anneal * self.backbone.kl_loss(mean, log_variance) / rows.shape[0]
+    def bce_loss(self, users, items, labels):
+        return F.binary_cross_entropy_with_logits(
+            self.forward(users, items), labels.float())
 
     def compute_all_scores(self, device=None):
-        return self.adapter.score_all_with_calibrated_state(self._state())
+        if self.scoring_state is None:
+            self.build_calibrated_embeddings()
+        return self.adapter.score_all_with_calibrated_state(self.scoring_state)
 
-    def compute_fairness_losses(self, refresh=False):
-        if refresh or self.last_output is None:
-            self.update_calibration_state()
-        return self.last_output.user_ot_objective, self.last_output.item_ot_objective
+    def compute_user_fixed_coupling_loss(self):
+        if not self.enable_user_calibration:
+            users, _ = self.get_native_embeddings()
+            return torch.tensor(0.0, device=users.device)
+        users, items = self.get_native_embeddings()
+        return self.user_calibration.fixed_coupling_loss(users, items)
 
-    def get_calibrated_embeddings(self):
-        state = self._state()
-        return state['calibrated_user_repr'], state['calibrated_item_repr']
+    def compute_item_fixed_coupling_loss(self):
+        if not self.enable_item_calibration:
+            _, items = self.get_native_embeddings()
+            return torch.tensor(0.0, device=items.device)
+        _, items = self.get_native_embeddings()
+        return self.item_calibration.fixed_coupling_loss(items)
 
-    def checkpoint_state(self, optimizer=None, scheduler=None, epoch=None, global_step=None):
-        return {
-            'model': self.state_dict(),
-            'optimizer': optimizer.state_dict() if optimizer is not None else None,
-            'scheduler': scheduler.state_dict() if scheduler is not None else None,
-            'epoch': epoch,
-            'global_step': global_step,
-            'config': self.config,
-            'dataset': self.dataset.name,
-            'split_hash': getattr(self.dataset, 'split_hash', None),
-            'backbone_name': self.backbone_name,
-            'calibration_metadata': {
-                'adv_users': self.user_calibration.adv_users,
-                'disadv_users': self.user_calibration.disadv_users,
-                'item_target_mode': self.item_calibration.item_target_mode,
-            },
-        }
+    def accuracy_parameters(self):
+        return list(self.parameters())
 
-    def save_checkpoint(self, path, optimizer=None, scheduler=None,
-                        epoch=None, global_step=None):
-        torch.save(self.checkpoint_state(optimizer, scheduler, epoch, global_step), path)
+    def fairness_correction_parameters(self):
+        return (self.user_calibration.fairness_parameters()
+                + self.item_calibration.fairness_parameters())
 
-    def load_checkpoint(self, path, optimizer=None, scheduler=None, map_location=None):
-        checkpoint = torch.load(path, map_location=map_location or self.device_hint,
-                                weights_only=False)
-        if checkpoint.get('split_hash') not in {None, getattr(self.dataset, 'split_hash', None)}:
-            raise ValueError('Checkpoint split hash does not match the loaded dataset')
-        model_state = checkpoint['model']
-        dynamic_buffers = {
-            'user_calibration.gmm_weights': (self.user_calibration, 'gmm_weights'),
-            'user_calibration.gmm_covariances': (self.user_calibration, 'gmm_covariances'),
-            'user_calibration.prototypes': (self.user_calibration, 'prototypes'),
-            'user_calibration.cached_gamma_u': (self.user_calibration, 'cached_gamma_u'),
-            'user_calibration.cached_user_ids': (self.user_calibration, 'cached_user_ids'),
-            'item_calibration.anchor_indices': (self.item_calibration, 'anchor_indices'),
-            'item_calibration.target_distribution': (self.item_calibration, 'target_distribution'),
-            'item_calibration.cached_item_projection': (self.item_calibration, 'cached_item_projection'),
-        }
-        for key, (module, name) in dynamic_buffers.items():
-            if key in model_state:
-                setattr(module, name, torch.empty_like(model_state[key], device=self.device_hint))
-        self.load_state_dict(model_state)
-        if optimizer is not None and checkpoint.get('optimizer') is not None:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-        if scheduler is not None and checkpoint.get('scheduler') is not None:
-            scheduler.load_state_dict(checkpoint['scheduler'])
-        self.calibration_state = None
-        self.last_output = None
+    def update_ema(self):
+        with torch.no_grad():
+            for name, parameter in self.named_parameters():
+                self.ema_state[name].mul_(self.ema_decay).add_(
+                    parameter.detach(), alpha=1.0 - self.ema_decay)
+
+    def clear_scoring_state(self):
+        self.scoring_state = None
         if hasattr(self.backbone, '_clear_cache'):
             self.backbone._clear_cache()
-        self.refresh_scoring_state()
+
+    def load_checkpoint_state(self, checkpoint, accuracy_optimizer=None,
+                              fairness_optimizer=None):
+        if checkpoint.get('split_hash') not in {None, getattr(self.dataset, 'split_hash', None)}:
+            raise ValueError('Checkpoint split hash mismatch')
+        self.load_state_dict(checkpoint['model'])
+        self.ema_state = {name: value.detach().clone().to(self.device_hint)
+                          for name, value in checkpoint['ema_state'].items()}
+        self.calibration_state = checkpoint['calibration_state']
+        state = self.calibration_state
+        self.alignment_mode = getattr(state, 'alignment_mode', self.alignment_mode)
+        self.user_calibration.alignment_mode = self.alignment_mode
+        self.item_calibration.alignment_mode = self.alignment_mode
+        self.user_calibration.user_transport = state.user_transport
+        self.user_calibration.sparse_user_ids = state.sparse_history_users
+        self.user_calibration.sparse_calibration_x = state.user_calibration_x
+        self.user_calibration.alignment_targets = state.user_barycentric_targets
+        self.user_calibration.hard_user_indices = getattr(state, 'user_hard_indices', None)
+        self.user_calibration.mmd_state = getattr(state, 'user_alignment_state', None)
+        self.item_calibration.transport_state = state.item_transport
+        self.item_calibration.target_distribution = state.item_target_marginal
+        self.item_calibration.source_distribution = getattr(state, 'item_source_marginal', None)
+        self.item_calibration.target_anchors = getattr(state, 'item_target_anchors', None)
+        self.item_calibration.barycentric_targets_cache = state.item_barycentric_targets
+        self.item_calibration.hard_item_indices = getattr(state, 'item_hard_indices', None)
+        self.item_calibration.mmd_state = getattr(state, 'item_alignment_state', None)
+        if accuracy_optimizer is not None and checkpoint.get('accuracy_optimizer'):
+            accuracy_optimizer.load_state_dict(checkpoint['accuracy_optimizer'])
+        if fairness_optimizer is not None and checkpoint.get('fairness_optimizer'):
+            fairness_optimizer.load_state_dict(checkpoint['fairness_optimizer'])
+        self.clear_scoring_state()
         return checkpoint
 
-    def clear_calibration_state(self):
-        self.calibration_state = None
-        self.last_output = None
-        if hasattr(self.backbone, '_clear_cache'):
-            self.backbone._clear_cache()
-
-    @staticmethod
-    def _gradient_norm(loss, parameters):
-        params = [parameter for parameter in parameters if parameter.requires_grad]
-        gradients = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
-        values = [gradient.norm().pow(2) for gradient in gradients if gradient is not None]
-        return torch.sqrt(torch.stack(values).sum()) if values else loss.new_tensor(0.0)
-
-    def compute_gradient_diagnostics(self):
-        user_loss, item_loss = self.compute_fairness_losses(refresh=True)
-        user_params = self.adapter.user_side_parameters()
-        item_params = self.adapter.item_side_parameters()
+    def checkpoint_state(self, accuracy_optimizer=None, fairness_optimizer=None,
+                         epoch=None, iteration=None, selection_metadata=None):
         return {
-            'user_loss_on_user_params': float(self._gradient_norm(user_loss, user_params).detach().cpu()),
-            'user_loss_on_item_params': float(self._gradient_norm(user_loss, item_params).detach().cpu()),
-            'item_loss_on_user_params': float(self._gradient_norm(item_loss, user_params).detach().cpu()),
-            'item_loss_on_item_params': float(self._gradient_norm(item_loss, item_params).detach().cpu()),
-        }
+            'model': {name: value.detach().clone()
+                      for name, value in self.state_dict().items()},
+            'ema_state': {name: value.detach().clone()
+                          for name, value in self.ema_state.items()},
+            'calibration_state': copy.deepcopy(self.calibration_state),
+            'accuracy_optimizer': (copy.deepcopy(accuracy_optimizer.state_dict())
+                                   if accuracy_optimizer else None),
+            'fairness_optimizer': (copy.deepcopy(fairness_optimizer.state_dict())
+                                   if fairness_optimizer else None),
+            'epoch': epoch, 'iteration': iteration,
+            'selection_metadata': copy.deepcopy(selection_metadata or {}),
+            'split_hash': getattr(self.dataset, 'split_hash', None),
+            'config': copy.deepcopy(self.config)}

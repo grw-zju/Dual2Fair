@@ -1,2 +1,9 @@
-from .metrics import ndcg_at_k, hit_ratio_at_k, compute_ndcg_full, compute_sampled_ndcg, compute_duf, compute_dif_from_exposure, compute_uif
 from .evaluator import Evaluator
+from .metrics import (average_per_run_uif, compute_dif_affine_invariant,
+                      compute_dif_rank, compute_duf, compute_rank_dif,
+                      compute_uif, hit_ratio_at_k, ndcg_at_k)
+
+__all__ = [
+    'Evaluator', 'average_per_run_uif', 'compute_dif_affine_invariant',
+    'compute_dif_rank', 'compute_duf', 'compute_rank_dif', 'compute_uif',
+    'hit_ratio_at_k', 'ndcg_at_k']

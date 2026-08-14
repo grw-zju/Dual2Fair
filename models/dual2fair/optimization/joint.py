@@ -8,5 +8,5 @@ def joint_weighted_sum_step(model, optimizer, recommendation_loss,
         import torch
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
     optimizer.step()
-    model.clear_calibration_state()
+    model.clear_scoring_state()
     return total.detach()

@@ -7,7 +7,7 @@ def alternating_step(model, optimizer, recommendation_closure,
     if clip_norm:
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
     optimizer.step()
-    model.clear_calibration_state()
+    model.clear_scoring_state()
 
     optimizer.zero_grad()
     fairness_loss = fairness_closure()
@@ -15,5 +15,5 @@ def alternating_step(model, optimizer, recommendation_closure,
     if clip_norm:
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
     optimizer.step()
-    model.clear_calibration_state()
+    model.clear_scoring_state()
     return recommendation_loss.detach(), fairness_loss.detach()

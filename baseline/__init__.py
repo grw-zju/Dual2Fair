@@ -8,6 +8,7 @@ from .ada2fair import Ada2Fair
 from .fair_method import FAIRMethod
 from .fairsort import FairSort
 from .popularity_ips import PopularityIPS
+from .external_official import ESAM, MGL
 
 
 BASELINES = {
@@ -21,6 +22,8 @@ BASELINES = {
     'fair': FAIRMethod,
     'fairsort': FairSort,
     'popularity_ips': PopularityIPS,
+    'esam': ESAM,
+    'mgl': MGL,
 }
 
 
@@ -35,6 +38,8 @@ CATEGORIES = {
     'fair': 'two-sided',
     'fairsort': 'two-sided',
     'popularity_ips': 'item-side',
+    'esam': 'external-official',
+    'mgl': 'external-official',
 }
 
 
@@ -49,4 +54,6 @@ PROCESSING_TYPES = {
     'fair': 'in-processing',
     'fairsort': 'post-processing',
     'popularity_ips': 'in-processing',
+    'esam': 'external-wrapper',
+    'mgl': 'external-wrapper',
 }
