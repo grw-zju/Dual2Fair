@@ -14,7 +14,7 @@ from run import init_backbone, load_config
 from models.dual2fair import Dual2Fair
 
 
-def benchmark(dataset_name='demo', backbone_name='lightgcn', config_path='config/default.yaml',
+def benchmark(dataset_name='demo', backbone_name='lightgcn', config_path='',
               method='dual2fair_lowrank', gpu=-1, data_dir=None):
     config = load_config(config_path)
     device = torch.device('cpu' if gpu < 0 or not torch.cuda.is_available() else f'cuda:{gpu}')
@@ -60,7 +60,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', default='demo')
     parser.add_argument('--backbone', default='lightgcn')
-    parser.add_argument('--config', default='config/default.yaml')
+    parser.add_argument('--config', default='')
     parser.add_argument('--method', default='dual2fair_lowrank',
                         choices=['standard', 'dual2fair_lowrank', 'dual2fair_dense'])
     parser.add_argument('--gpu', type=int, default=-1)

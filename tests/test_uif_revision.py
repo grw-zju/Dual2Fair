@@ -1,12 +1,11 @@
 import numpy as np
 import pytest
 import torch
-import yaml
 
 from data.dataset_utils import load_dataset
 from evaluation.evaluator import Evaluator
 from evaluation.metrics import average_per_run_uif, compute_uif
-from run import _make_evaluator
+from run import _make_evaluator, load_config
 
 
 def test_split_specific_uif_references_are_required():
@@ -33,8 +32,7 @@ def test_evaluator_requires_split_references_when_configured():
 
 
 def test_default_config_marks_uif_references_required():
-    with open('config/default.yaml') as handle:
-        settings = yaml.safe_load(handle)
+    settings = load_config(None)
     dataset = load_dataset('demo', min_ui=3, min_ii=1)
     evaluator = _make_evaluator(dataset, settings, torch.device('cpu'), split='val')
     assert evaluator.require_uif_reference is True

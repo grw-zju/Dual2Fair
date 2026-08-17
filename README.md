@@ -1,6 +1,6 @@
 # Dual2Fair
 
-PyTorch implementation of Dual2Fair for fairness-aware recommendation on sparse-history users and long-tail items.
+PyTorch implementation of Dual2Fair for fairness-aware recommendation.
 
 ## Installation
 
@@ -8,19 +8,15 @@ PyTorch implementation of Dual2Fair for fairness-aware recommendation on sparse-
 pip install -r requirements.txt
 ```
 
-## Data availability
+## Data
 
-Due to dataset size and redistribution constraints, the complete processed datasets are not stored in this repository. The processed data package used by this project can be downloaded from Google Drive:
+The complete processed datasets are not stored in this repository. Download the processed data package from Google Drive and place the files under `data/`:
 
 ```text
 https://drive.google.com/drive/folders/1nbI95AFsZG2Oq0cZAYVEBKK8spGpqJ3p?usp=sharing
 ```
 
-Place the downloaded files under the corresponding directories in `data/`. Expected data locations and preprocessing details are described in `docs/data_preparation.md`.
-
-The repository includes the preprocessing, evaluation, and benchmarking code. The lightweight demo data are intended only for interface validation and do not reproduce the numerical results in Tables IV-V.
-
-### Dataset Statistics
+A lightweight demo dataset is included at `data/demo/interactions.csv` for interface validation.
 
 | Dataset | Users | Items | Interactions | Sparsity |
 |---|---:|---:|---:|---:|
@@ -32,23 +28,8 @@ The repository includes the preprocessing, evaluation, and benchmarking code. Th
 
 ```text
 Dual2Fair/
-  config/
-    default.yaml
   data/
-    dataset_utils.py
-    demo/
-  docs/
-    data_preparation.md
   models/
-    backbone/
-    dual2fair/
-      alignment.py
-      user_calibration.py
-      item_calibration.py
-      sinkhorn.py
-      hierarchical_opt.py
-      state.py
-      dual2fair.py
   baseline/
   evaluation/
   scripts/
@@ -58,24 +39,18 @@ Dual2Fair/
 
 ## Quick Demo
 
-The demo dataset can be used for CPU smoke tests:
-
 ```bash
-python run.py --dataset demo --backbone lightgcn --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
-python run.py --dataset demo --backbone neumf --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
-python run.py --dataset demo --backbone vaecf --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
+python3 run.py --dataset demo --backbone lightgcn --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
+python3 run.py --dataset demo --backbone neumf --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
+python3 run.py --dataset demo --backbone vaecf --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
 ```
 
-## Running Experiments
-
-### Main Model
-
-Dual2Fair uses accuracy-first hierarchical alternating optimization.
+## Run Full Experiments
 
 ```bash
-python run.py --dataset movielens --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config config/default.yaml
-python run.py --dataset epinions --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config config/default.yaml
-python run.py --dataset gowalla --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config config/default.yaml
+python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --eval_mode full --gpu 0
+python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --eval_mode full --gpu 0
+python3 run.py --dataset gowalla --backbone lightgcn --method dual2fair --eval_mode full --gpu 0
 ```
 
 Supported datasets:
@@ -90,48 +65,19 @@ Supported backbones:
 lightgcn, neumf, vaecf
 ```
 
-### Five Independent Runs
+## Baselines and Ablations
 
 ```bash
-python scripts/run_five_seeds.py --dataset movielens --backbone lightgcn --method dual2fair \
-  --split-seed 2026 --gpu 0 --config config/default.yaml
+python3 run.py --dataset movielens --backbone lightgcn --method standard --eval_mode full --gpu 0
+python3 run.py --dataset movielens --backbone lightgcn --method dpr --eval_mode full --gpu 0
+python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --eval_mode full --gpu 0
+python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode mmd --eval_mode full --gpu 0
 ```
 
-### Ablation Studies
+Available method choices and command-line options are listed in `run.py`.
+
+## Tests
 
 ```bash
-python run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --eval_mode full --gpu 0
-python run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode mmd --eval_mode full --gpu 0
-```
-
-Common config switches:
-
-| Ablation | Config |
-|---|---|
-| w/o URC | `dual2fair.enable_user_calibration: false` |
-| w/o IRC | `dual2fair.enable_item_calibration: false` |
-| Uniform Target | `dual2fair.omega: 1.0` |
-| Merit Only | `dual2fair.omega: 0.0` |
-| w/o Confidence | `dual2fair.enable_confidence: false` |
-| Joint Weighted Sum | `dual2fair.optimization_strategy: joint_weighted_sum` |
-| Standard Alternating | `dual2fair.optimization_strategy: standard_alternating` |
-| Hard Matching | `dual2fair.alignment_mode: hard` |
-| MMD Alignment | `dual2fair.alignment_mode: mmd` |
-
-### Baselines
-
-```bash
-python run.py --dataset movielens --backbone lightgcn --method standard --eval_mode full --gpu 0
-python run.py --dataset movielens --backbone lightgcn --method dpr --eval_mode full --gpu 0
-python run.py --dataset movielens --backbone lightgcn --method fairdual --eval_mode full --gpu 0
-```
-
-Available method choices are listed in `run.py`.
-
-### Efficiency and Analysis
-
-```bash
-python scripts/benchmark_efficiency.py
-python scripts/benchmark_scaling.py --dataset gowalla --subset-dir results/gowalla_subsets
-python scripts/analyze_cross_side_interference.py
+python -m pytest -q
 ```

@@ -2,18 +2,16 @@ import copy
 
 import pytest
 import torch
-import yaml
 
 from data.dataset_utils import load_dataset
 from evaluation.evaluator import Evaluator
 from models.dual2fair import Dual2Fair
 from models.dual2fair.hierarchical_opt import HierarchicalAlternatingOptimizer
-from run import init_backbone, sample_negatives
+from run import init_backbone, load_config, sample_negatives
 
 
 def tiny_config(mode):
-    with open('config/default.yaml') as handle:
-        settings = yaml.safe_load(handle)
+    settings = load_config(None)
     settings['model'].update({'embedding_dim': 8, 'batch_size': 8})
     settings['dual2fair'].update({
         'alignment_mode': mode,

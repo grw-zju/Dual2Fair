@@ -1,16 +1,14 @@
 import copy
 
 import torch
-import yaml
 
 from data.dataset_utils import load_dataset
 from models.dual2fair import Dual2Fair
-from run import init_backbone
+from run import init_backbone, load_config
 
 
 def config():
-    with open('config/default.yaml') as handle:
-        settings = yaml.safe_load(handle)
+    settings = load_config(None)
     settings['model']['embedding_dim'] = 8
     settings['dual2fair'].update({
         'gmm_clusters': 2, 'training_candidate_size': 6,

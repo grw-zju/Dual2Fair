@@ -4,12 +4,12 @@ import sys
 
 import pytest
 import torch
-import yaml
 
 from baseline import BASELINES, CATEGORIES, PROCESSING_TYPES
 from baseline.external_official import ESAM, MGL, PROVENANCE
 from data.dataset_utils import load_dataset
 from evaluation.evaluator import Evaluator
+from run import load_config
 
 
 def test_esam_mgl_are_official_external_wrappers():
@@ -63,7 +63,6 @@ def test_external_wrapper_exports_split_and_collects_metrics(tmp_path):
 
 
 def test_default_config_contains_external_provenance():
-    with open('config/default.yaml') as handle:
-        settings = yaml.safe_load(handle)
+    settings = load_config(None)
     assert settings['baseline']['esam']['official_repo'] == PROVENANCE['esam'].repo_url
     assert settings['baseline']['mgl']['official_repo'] == PROVENANCE['mgl'].repo_url

@@ -36,7 +36,7 @@ def main():
     parser.add_argument('--dataset', required=True)
     parser.add_argument('--backbone', required=True)
     parser.add_argument('--method', required=True)
-    parser.add_argument('--config', default='config/default.yaml')
+    parser.add_argument('--config', default='')
     parser.add_argument('--split-seed', type=int, default=2026)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--output-root', default='results')

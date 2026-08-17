@@ -30,9 +30,120 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+DEFAULT_CONFIG = {
+    'backbone': {
+        'lightgcn': {'dropout': 0.0, 'n_layers': 3},
+        'neumf': {'mlp_layers': [128, 64, 32], 'pretrain': False},
+        'vaecf': {
+            'anneal_cap': 0.2,
+            'decoder_hidden_dims': [200],
+            'dropout': 0.5,
+            'encoder_hidden_dims': [600, 200],
+            'total_anneal_steps': 200000,
+        },
+    },
+    'baseline': {
+        'ada2fair': {'delta': 1e-6, 'lambda_item': 0.1, 'lambda_user': 0.1,
+                     'provider_eta': 1.0, 'top_k': 100, 'user_batch_size': 512,
+                     'user_eta': 1.0},
+        'cpfair': {'alpha': 0.5, 'utility_weight': 0.8},
+        'dpr': {'alpha_adv': 0.01, 'lambda_dpr': 0.1, 'reg_s': 1e-4},
+        'esam': {'official_repo': 'https://github.com/A-bone1/ESAM',
+                 'paper_title': 'ESAM: Discriminative Domain Adaptation with Non-Displayed Items to Improve Long-Tail Performance',
+                 'repo_path': None, 'expected_commit': None, 'command': None,
+                 'output_root': 'external_baseline_runs'},
+        'fair': {'eta': 0.01, 'lambda_item': 0.1, 'lambda_user': 0.1},
+        'fairdual': {'lambda_dual': 0.1},
+        'fairsort': {'min_utility': 0.8, 'search_steps': 6},
+        'mgl': {'official_repo': 'https://github.com/weicy15/MGL',
+                'paper_title': 'Meta Graph Learning for Long-tail Recommendation',
+                'repo_path': None, 'expected_commit': None, 'command': None,
+                'output_root': 'external_baseline_runs'},
+        'multifr': {'lambda_item': 0.1, 'lambda_user': 0.1},
+        'popularity_ips': {'alpha': 0.5, 'max_weight': 10.0},
+        'ufr': {'delta': 0.05},
+    },
+    'dataset': {
+        'demo': {'min_item_interactions': 1, 'min_user_interactions': 3},
+        'epinions': {'min_item_interactions': 1, 'min_user_interactions': 3},
+        'gowalla': {'min_item_interactions': 1, 'min_user_interactions': 3},
+        'movielens': {'min_item_interactions': 1, 'min_user_interactions': 3},
+    },
+    'dual2fair': {
+        'eps0': 1e-8, 'log_eps': 1e-20,
+        'sparse_user_ratio': 0.95,
+        'gmm_clusters': 64, 'gmm_max_iter': 50,
+        'gmm_tol': 1e-4, 'gmm_covariance_floor': 1e-6,
+        'rho_u_init': -2.0, 'rho_v_init': -2.0,
+        'epsilon_u': 0.1, 'epsilon_v': 0.1,
+        'tau_u': 0.2, 'tau_v': 0.2,
+        'kappa': 1.0, 'beta_pop': 0.5,
+        'delta_m': 1e-6, 'omega': 0.2,
+        'ema_decay': 0.99,
+        'training_candidate_size': 500,
+        'calibration_refresh_epochs': 1,
+        'user_kernel_chunk_size': 4096,
+        'nystrom_initial_rank': 32,
+        'nystrom_max_rank': 256,
+        'nystrom_tol': 1e-3,
+        'nystrom_num_strata': 5,
+        'nystrom_pinv_rtol': 1e-6,
+        'sinkhorn_max_iter': 100,
+        'sinkhorn_tol': 1e-3,
+        'fairness_learning_rate': 5e-4,
+        'mirror_interval': 3,
+        'mirror_alpha1': 1.0,
+        'mirror_alpha2': 0.1,
+        'enable_user_calibration': True,
+        'enable_item_calibration': True,
+        'enable_confidence': True,
+        'alignment_mode': 'ot',
+        'optimization_strategy': 'hierarchical_alternating',
+    },
+    'evaluation': {
+        'mode': 'full', 'require_uif_reference': True,
+        'user_batch_size': 64, 'top_k': 10,
+        'uif_w1': 0.5, 'uif_w2': 0.5,
+        'uif_references': {'val': {'DUF': None, 'DIF': None},
+                           'test': {'DUF': None, 'DIF': None}},
+        'seeds': [42, 43, 44, 45, 46],
+    },
+    'grid_search': {
+        'ndcg_drop_tolerance': 0.01,
+        'lambda1_range': [0.01, 0.05, 0.1, 0.5, 1, 10],
+        'lambda2_range': [0.01, 0.05, 0.1, 0.5, 1, 10],
+    },
+    'model': {
+        'batch_size': 4096,
+        'early_stop_patience': 50,
+        'embedding_dim': 64,
+        'gradient_clip_val': 1.0,
+        'init_method': 'xavier',
+        'learning_rate': 1e-3,
+        'max_epochs': 200,
+        'n_neg': 1,
+        'n_neg_bce': 4,
+        'optimizer': 'adam',
+        'warmup_ratio': 0.1,
+        'weight_decay': 1e-5,
+    },
+    'seeds': {
+        'data_split': 2026,
+        'negative_sampling': 42,
+        'model': 42,
+        'ot_sampling': 42,
+        'evaluation': 42,
+    },
+}
+
+
 def load_config(config_path):
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+    if config_path and os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            return yaml.safe_load(f)
+    if config_path in {None, '', 'config/default.yaml'}:
+        return copy.deepcopy(DEFAULT_CONFIG)
+    raise FileNotFoundError(config_path)
 
 
 def sample_negatives(dataset, n_neg=1):
@@ -972,7 +1083,7 @@ def main():
                         choices=['sampled', 'full'])
     parser.add_argument('--loss_type', type=str, default='bpr',
                         choices=['bce', 'bpr'])
-    parser.add_argument('--config', type=str, default='config/default.yaml')
+    parser.add_argument('--config', type=str, default='')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--seeds', type=int, nargs='+', default=None)
     parser.add_argument('--split-seed', type=int, default=2026)
