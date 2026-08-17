@@ -8,12 +8,12 @@ import sys
 import numpy as np
 
 
-PAPER_SEEDS = [42, 43, 44, 45, 46]
+SEEDS = [42, 43, 44, 45, 46]
 
 
 def aggregate_runs(runs):
     if len(runs) != 5 or len({run['model_seed'] for run in runs}) != 5:
-        raise ValueError('Paper aggregation requires five distinct model seeds')
+        raise ValueError('Aggregation requires five distinct model seeds')
     invariants = ('split_hash', 'dataset', 'backbone', 'method', 'eval_mode')
     for key in invariants:
         if len({str(run.get(key)) for run in runs}) != 1:
@@ -50,7 +50,7 @@ def main():
     directory = os.path.join(args.output_root, args.dataset, args.backbone, args.method)
     os.makedirs(directory, exist_ok=True)
     runs = []
-    for seed in PAPER_SEEDS:
+    for seed in SEEDS:
         suffix = f'_seed_{seed}'
         command = [sys.executable, 'run.py', '--dataset', args.dataset,
                    '--backbone', args.backbone, '--method', args.method,

@@ -83,7 +83,7 @@ def select_config(standard_aggregate, candidates, retention_ratio=0.98):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Select paper hyperparameters from five-seed validation aggregates.')
+    parser = argparse.ArgumentParser(description='Select hyperparameters from five-seed validation aggregates.')
     parser.add_argument('--standard-aggregate', required=True)
     parser.add_argument('--candidate', action='append', required=True)
     parser.add_argument('--retention-ratio', type=float, default=0.98)

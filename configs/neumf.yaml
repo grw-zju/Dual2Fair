@@ -35,7 +35,7 @@ baseline:
     reg_s: 0.0001
   esam:
     official_repo: https://github.com/A-bone1/ESAM
-    paper_title: 'ESAM: Discriminative Domain Adaptation with Non-Displayed Items
+    source_title: 'ESAM: Discriminative Domain Adaptation with Non-Displayed Items
       to Improve Long-Tail Performance'
     repo_path: null
     expected_commit: null
@@ -52,7 +52,7 @@ baseline:
     search_steps: 6
   mgl:
     official_repo: https://github.com/weicy15/MGL
-    paper_title: Meta Graph Learning for Long-tail Recommendation
+    source_title: Meta Graph Learning for Long-tail Recommendation
     repo_path: null
     expected_commit: null
     command: null
@@ -173,4 +173,4 @@ seeds:
   model: 42
   ot_sampling: 42
   evaluation: 42
-paper_backbone: neumf
+backbone_name: neumf

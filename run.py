@@ -49,14 +49,14 @@ DEFAULT_CONFIG = {
         'cpfair': {'alpha': 0.5, 'utility_weight': 0.8},
         'dpr': {'alpha_adv': 0.01, 'lambda_dpr': 0.1, 'reg_s': 1e-4},
         'esam': {'official_repo': 'https://github.com/A-bone1/ESAM',
-                 'paper_title': 'ESAM: Discriminative Domain Adaptation with Non-Displayed Items to Improve Long-Tail Performance',
+                 'source_title': 'ESAM: Discriminative Domain Adaptation with Non-Displayed Items to Improve Long-Tail Performance',
                  'repo_path': None, 'expected_commit': None, 'command': None,
                  'output_root': 'external_baseline_runs'},
         'fair': {'eta': 0.01, 'lambda_item': 0.1, 'lambda_user': 0.1},
         'fairdual': {'lambda_dual': 0.1},
         'fairsort': {'min_utility': 0.8, 'search_steps': 6},
         'mgl': {'official_repo': 'https://github.com/weicy15/MGL',
-                'paper_title': 'Meta Graph Learning for Long-tail Recommendation',
+                'source_title': 'Meta Graph Learning for Long-tail Recommendation',
                 'repo_path': None, 'expected_commit': None, 'command': None,
                 'output_root': 'external_baseline_runs'},
         'multifr': {'lambda_item': 0.1, 'lambda_user': 0.1},
@@ -1095,7 +1095,7 @@ def train_baseline(dataset, backbone_name, baseline_name, config, device,
     if proc_type == 'unavailable-external':
         raise NotImplementedError(
             f'{baseline_name} exact implementation is not available locally; '
-            'provide an official adapter before running paper reproduction.')
+            'provide an official adapter before running reproduction.')
     if proc_type == 'post-processing':
         return train_postprocessing_baseline(dataset, backbone_name, baseline_name,
                                              config, device, eval_mode, loss_type, save_path)
@@ -1148,7 +1148,7 @@ def main():
         import subprocess
         from scripts.run_five_seeds import aggregate_runs
         if len(args.seeds) != 5 or len(set(args.seeds)) != 5:
-            raise ValueError('Paper aggregation requires exactly five distinct model seeds')
+            raise ValueError('Aggregation requires exactly five distinct model seeds')
         aggregate = []
         for model_seed in args.seeds:
             command = [sys.executable, os.path.abspath(__file__), '--dataset', args.dataset,

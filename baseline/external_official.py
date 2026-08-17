@@ -13,7 +13,7 @@ import torch
 @dataclass(frozen=True)
 class ExternalBaselineProvenance:
     name: str
-    paper_title: str
+    source_title: str
     venue: str
     doi: str
     repo_url: str
@@ -25,7 +25,7 @@ class ExternalBaselineProvenance:
 PROVENANCE = {
     'esam': ExternalBaselineProvenance(
         name='ESAM',
-        paper_title='ESAM: Discriminative Domain Adaptation with Non-Displayed Items to Improve Long-Tail Performance',
+        source_title='ESAM: Discriminative Domain Adaptation with Non-Displayed Items to Improve Long-Tail Performance',
         venue='SIGIR 2020',
         doi='10.1145/3397271.3401043',
         repo_url='https://github.com/A-bone1/ESAM',
@@ -35,7 +35,7 @@ PROVENANCE = {
         default_entrypoint='test_cikm.py'),
     'mgl': ExternalBaselineProvenance(
         name='MGL',
-        paper_title='Meta Graph Learning for Long-tail Recommendation',
+        source_title='Meta Graph Learning for Long-tail Recommendation',
         venue='KDD 2023',
         doi='10.1145/3580305.3599428',
         repo_url='https://github.com/weicy15/MGL',
@@ -109,7 +109,7 @@ class OfficialExternalBaseline:
                       if dataset.item_freq.get(item, 0) > 0]
         metadata = {
             'method': self.method_key,
-            'paper_title': self.provenance.paper_title,
+            'source_title': self.provenance.source_title,
             'venue': self.provenance.venue,
             'doi': self.provenance.doi,
             'official_repo': self.provenance.repo_url,

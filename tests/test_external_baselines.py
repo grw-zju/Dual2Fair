@@ -19,8 +19,8 @@ def test_esam_mgl_are_official_external_wrappers():
     assert CATEGORIES['mgl'] == 'external-official'
     assert PROCESSING_TYPES['esam'] == 'external-wrapper'
     assert PROCESSING_TYPES['mgl'] == 'external-wrapper'
-    assert 'Non-Displayed Items' in PROVENANCE['esam'].paper_title
-    assert 'Meta Graph Learning' in PROVENANCE['mgl'].paper_title
+    assert 'Non-Displayed Items' in PROVENANCE['esam'].source_title
+    assert 'Meta Graph Learning' in PROVENANCE['mgl'].source_title
 
 
 def test_external_wrapper_requires_repo_path():

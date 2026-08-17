@@ -29,7 +29,7 @@ def audit(name):
             'dataset': name,
             'raw_file': path,
             'observed': None,
-            'paper_reference': EXPECTED[name],
+            'expected_statistics': EXPECTED[name],
             'matches': False,
             'status': 'missing raw data; preprocessing audit not run',
         }
@@ -41,7 +41,7 @@ def audit(name):
         'dataset': name,
         'raw_file': path,
         'observed': observed,
-        'paper_reference': EXPECTED[name],
+        'expected_statistics': EXPECTED[name],
         'matches': observed == EXPECTED[name],
         'status': 'aligned' if observed == EXPECTED[name] else 'requires result reproduction check',
     }

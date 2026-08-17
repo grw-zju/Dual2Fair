@@ -1,4 +1,4 @@
-from scripts.select_paper_config import select_config
+from scripts.select_config import select_config
 
 
 def candidate(l1, l2, ndcg, uif):

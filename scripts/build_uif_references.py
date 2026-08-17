@@ -7,7 +7,7 @@ import sys
 
 import yaml
 
-PAPER_SEEDS = [42, 43, 44, 45, 46]
+SEEDS = [42, 43, 44, 45, 46]
 
 
 def load_json(path):
@@ -78,7 +78,7 @@ def write_reference(reference, path):
 def main():
     parser = argparse.ArgumentParser(description='Build split-specific UIF references from five Standard runs.')
     parser.add_argument('results', nargs='+')
-    parser.add_argument('--expected-seeds', nargs='+', type=int, default=PAPER_SEEDS)
+    parser.add_argument('--expected-seeds', nargs='+', type=int, default=SEEDS)
     parser.add_argument('--output')
     args = parser.parse_args()
     write_reference(validate_and_build(args.results, args.expected_seeds), args.output)

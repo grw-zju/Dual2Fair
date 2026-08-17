@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-PAPER_SEEDS = [42, 43, 44, 45, 46]
+SEEDS = [42, 43, 44, 45, 46]
 LAMBDA_GRID = [0.01, 0.05, 0.1, 0.5, 1, 10]
 
 
@@ -17,11 +17,11 @@ def run_command(command, dry_run):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Orchestrate the paper five-seed validation-selection-test workflow.')
+    parser = argparse.ArgumentParser(description='Orchestrate the five-seed validation-selection-test workflow.')
     parser.add_argument('--dataset', required=True)
     parser.add_argument('--backbone', required=True)
-    parser.add_argument('--config', default='configs/paper_default.yaml')
-    parser.add_argument('--results-root', default='results/paper_grid')
+    parser.add_argument('--config', default='configs/default.yaml')
+    parser.add_argument('--results-root', default='results/grid')
     parser.add_argument('--uif-reference-file')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
@@ -32,7 +32,7 @@ def main():
     os.makedirs(args.results_root, exist_ok=True)
     plan = []
     for lambda1, lambda2 in itertools.product(LAMBDA_GRID, LAMBDA_GRID):
-        for seed in PAPER_SEEDS:
+        for seed in SEEDS:
             output_suffix = f'_l1_{lambda1:g}_l2_{lambda2:g}_seed_{seed}'
             command = [
                 sys.executable, 'run.py', '--dataset', args.dataset,
@@ -46,9 +46,9 @@ def main():
             ]
             plan.append(command)
             run_command(command, args.dry_run)
-    with open(os.path.join(args.results_root, 'paper_grid_plan.json'), 'w') as handle:
+    with open(os.path.join(args.results_root, 'grid_plan.json'), 'w') as handle:
         json.dump({'dataset': args.dataset, 'backbone': args.backbone,
-                   'seeds': PAPER_SEEDS, 'lambda_grid': LAMBDA_GRID,
+                   'seeds': SEEDS, 'lambda_grid': LAMBDA_GRID,
                    'commands': plan}, handle, indent=2)
 
 

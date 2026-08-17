@@ -97,6 +97,6 @@ class Evaluator:
 
     def sampled_evaluate(self, *args, **kwargs):
         import warnings
-        warnings.warn('sampled_evaluate is debug-only and deprecated for paper results',
+        warnings.warn('sampled_evaluate is debug-only and deprecated for reported results',
                       DeprecationWarning, stacklevel=2)
         return self.evaluate(*args, **kwargs)

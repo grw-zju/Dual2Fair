@@ -56,7 +56,7 @@ def main():
     parser.add_argument('--data-root', default='data')
     parser.add_argument('--manifest')
     parser.add_argument('--dataset', action='append', choices=sorted(EXPECTED_STATS),
-                        help='Dataset to verify; defaults to all paper datasets')
+                        help='Dataset to verify; defaults to all datasets')
     args = parser.parse_args()
     manifest = load_manifest(args.manifest)
     config = load_config('')
