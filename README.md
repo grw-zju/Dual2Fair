@@ -10,19 +10,15 @@ pip install -r requirements.txt
 
 ## Data availability
 
-Due to dataset size and redistribution constraints, the complete datasets are not stored in this repository. Please obtain the original datasets from the sources listed below and follow `docs/data_preparation.md` to reproduce the processed splits used in the paper.
-
-The repository includes the preprocessing, evaluation, and benchmarking code. The lightweight demo data are intended only for interface validation and do not reproduce the numerical results in Tables IV-V.
-
-Original data sources:
+Due to dataset size and redistribution constraints, the complete processed datasets are not stored in this repository. The processed data package used by this project can be downloaded from Google Drive:
 
 ```text
-MovieLens-1M: https://files.grouplens.org/datasets/movielens/ml-1m.zip
-Epinions: https://www.cse.msu.edu/~tangjili/datasetcode/epinions_with_rating_timestamp_txt.zip
-Gowalla: https://huggingface.co/datasets/habedi/gowalla-dataset/resolve/main/original_data/loc-gowalla_totalCheckins.txt.gz?download=true
+https://drive.google.com/drive/folders/1nbI95AFsZG2Oq0cZAYVEBKK8spGpqJ3p?usp=sharing
 ```
 
-Expected data locations are described in `docs/data_preparation.md`.
+Place the downloaded files under the corresponding directories in `data/`. Expected data locations and preprocessing details are described in `docs/data_preparation.md`.
+
+The repository includes the preprocessing, evaluation, and benchmarking code. The lightweight demo data are intended only for interface validation and do not reproduce the numerical results in Tables IV-V.
 
 ### Dataset Statistics
 
