@@ -1,6 +1,6 @@
 # Dual2Fair
 
-PyTorch implementation of Dual2Fair for fairness-aware recommendation.
+PyTorch implementation for **Decoupled User–Item Representation Calibration for Two-Sided Fairness in Recommendation**.
 
 ## Installation
 
@@ -10,13 +10,21 @@ pip install -r requirements.txt
 
 ## Data
 
+### Download
+
 The complete processed datasets are not stored in this repository. Download the processed data package from Google Drive and place the files under `data/`:
 
 ```text
 https://drive.google.com/drive/folders/1nbI95AFsZG2Oq0cZAYVEBKK8spGpqJ3p?usp=sharing
 ```
 
-A lightweight demo dataset is included at `data/demo/interactions.csv` for interface validation.
+A lightweight demo dataset is included at:
+
+```text
+data/demo/interactions.csv
+```
+
+### Dataset Statistics
 
 | Dataset | Users | Items | Interactions | Sparsity |
 |---|---:|---:|---:|---:|
@@ -45,7 +53,9 @@ python3 run.py --dataset demo --backbone neumf --method dual2fair --eval_mode fu
 python3 run.py --dataset demo --backbone vaecf --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
 ```
 
-## Run Full Experiments
+## Running Experiments
+
+### Main Model
 
 ```bash
 python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --eval_mode full --gpu 0
@@ -65,19 +75,29 @@ Supported backbones:
 lightgcn, neumf, vaecf
 ```
 
-## Baselines and Ablations
+### Baselines
 
 ```bash
 python3 run.py --dataset movielens --backbone lightgcn --method standard --eval_mode full --gpu 0
 python3 run.py --dataset movielens --backbone lightgcn --method dpr --eval_mode full --gpu 0
+python3 run.py --dataset movielens --backbone lightgcn --method fairdual --eval_mode full --gpu 0
+```
+
+### Ablations
+
+```bash
 python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --eval_mode full --gpu 0
 python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode mmd --eval_mode full --gpu 0
 ```
 
-Available method choices and command-line options are listed in `run.py`.
+### Five Runs
+
+```bash
+python3 scripts/run_five_seeds.py --dataset movielens --backbone lightgcn --method dual2fair --gpu 0
+```
 
 ## Tests
 
 ```bash
-python -m pytest -q
+python3 -m pytest -q
 ```
