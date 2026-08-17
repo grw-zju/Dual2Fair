@@ -63,7 +63,7 @@ def main():
     parser.add_argument('--subset-dir', required=True,
                         help='Directory containing 20/40/60/80/100 Gowalla subset folders')
     parser.add_argument('--backbone', default='lightgcn')
-    parser.add_argument('--config', default='')
+    parser.add_argument('--config', default='config/default.yaml')
     parser.add_argument('--method', default='dual2fair_lowrank',
                         choices=['standard', 'dual2fair_lowrank', 'dual2fair_dense'])
     parser.add_argument('--gpu', type=int, default=-1)

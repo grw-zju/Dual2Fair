@@ -74,7 +74,7 @@ def inference_latency(model, dataset, device, method, warmup_repeats, measure_re
     return (time.perf_counter() - start) / max(1, measure_repeats)
 
 
-def benchmark(dataset_name='demo', backbone_name='lightgcn', config_path='',
+def benchmark(dataset_name='demo', backbone_name='lightgcn', config_path='config/default.yaml',
               method='dual2fair_lowrank', gpu=-1, data_dir=None,
               warmup_repeats=3, measure_repeats=10, checkpoint=None):
     config = load_config(config_path)
@@ -142,7 +142,7 @@ def main():
     parser = argparse.ArgumentParser(description='Benchmark training, refresh, memory, and serving latency.')
     parser.add_argument('--dataset', default='demo')
     parser.add_argument('--backbone', default='lightgcn')
-    parser.add_argument('--config', default='')
+    parser.add_argument('--config', default='config/default.yaml')
     parser.add_argument('--method', default='dual2fair_lowrank',
                         choices=['standard', 'dual2fair_lowrank', 'dual2fair_dense'])
     parser.add_argument('--gpu', type=int, default=-1)

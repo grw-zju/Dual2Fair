@@ -34,15 +34,17 @@ def validate_and_build(paths, expected_seeds):
     dataset = {record.get('dataset') for record in records}
     backbone = {record.get('backbone') for record in records}
     split_hash = {record.get('split_hash') for record in records}
+    eval_mode = {record.get('eval_mode') for record in records}
     method = {record.get('method') for record in records}
-    if len(dataset) != 1 or len(backbone) != 1 or len(split_hash) != 1:
-        raise ValueError('dataset/backbone/split_hash must match across runs')
+    if len(dataset) != 1 or len(backbone) != 1 or len(split_hash) != 1 or len(eval_mode) != 1:
+        raise ValueError('dataset/backbone/split_hash/eval_mode must match across runs')
     if method != {'standard'}:
         raise ValueError(f'UIF references must be built from Standard runs, got {method}')
     output = {
         'dataset': dataset.pop(),
         'backbone': backbone.pop(),
         'split_hash': split_hash.pop(),
+        'eval_mode': eval_mode.pop(),
         'seeds': sorted(seeds),
     }
     for split in ('validation', 'test'):
@@ -56,9 +58,9 @@ def validate_and_build(paths, expected_seeds):
                 if not math.isfinite(value):
                     raise ValueError(f'Non-finite {metric} in {split} block')
                 (dufs if metric == 'DUF' else difs).append(value)
-        output[split] = {
-            'DUF_ref': float(sum(dufs) / len(dufs)),
-            'DIF_ref': float(sum(difs) / len(difs)),
+        output['val' if split == 'validation' else 'test'] = {
+            'DUF': float(sum(dufs) / len(dufs)),
+            'DIF': float(sum(difs) / len(difs)),
         }
     return output
 

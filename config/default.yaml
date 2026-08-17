@@ -117,7 +117,7 @@ dual2fair:
   enable_item_calibration: true
   enable_confidence: true
   alignment_mode: ot
-  optimization_strategy: hierarchical_alternating
+  optimization_strategy: hierarchical_mirror
 evaluation:
   mode: full
   require_uif_reference: true
@@ -173,4 +173,3 @@ seeds:
   model: 42
   ot_sampling: 42
   evaluation: 42
-backbone_name: lightgcn

@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser(description='Orchestrate the five-seed validation-selection-test workflow.')
     parser.add_argument('--dataset', required=True)
     parser.add_argument('--backbone', required=True)
-    parser.add_argument('--config', default='configs/default.yaml')
+    parser.add_argument('--config', default='config/default.yaml')
     parser.add_argument('--results-root', default='results/grid')
     parser.add_argument('--uif-reference-file')
     parser.add_argument('--dry-run', action='store_true')
