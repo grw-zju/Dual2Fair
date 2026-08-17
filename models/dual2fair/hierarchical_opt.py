@@ -50,7 +50,7 @@ class HierarchicalAlternatingOptimizer:
         self.model.build_calibrated_embeddings()
         first_loss = self._fairness_loss(lambda_user, lambda_item)
         parameters = self.model.fairness_correction_parameters()
-        use_mirror = (strategy == 'hierarchical_mirror'
+        use_mirror = (strategy in {'hierarchical_mirror', 'hierarchical_alternating'}
                       and self.refresh_count % self.mirror_interval == 0)
         if use_mirror:
             _, first_gradients = self._gradients(first_loss)

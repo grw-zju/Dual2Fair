@@ -377,7 +377,8 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
     patience_limit = model_config.get('early_stop_patience', 50)
     batch_size = model_config.get('batch_size', 4096)
     refresh_epochs = settings['calibration_refresh_epochs']
-    strategy = settings.get('optimization_strategy', 'hierarchical_mirror')
+    strategy = settings.get('optimization_strategy', 'hierarchical_alternating')
+    print('Using accuracy-first hierarchical alternating optimization')
     validation_trajectory = []
     best_ndcg, best_results, best_checkpoint = float('-inf'), None, None
     patience = iteration = 0

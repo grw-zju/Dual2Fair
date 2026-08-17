@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import resource
@@ -14,11 +15,12 @@ from models.dual2fair import Dual2Fair
 
 
 def benchmark(dataset_name='demo', backbone_name='lightgcn', config_path='config/default.yaml',
-              method='dual2fair_lowrank', gpu=-1):
+              method='dual2fair_lowrank', gpu=-1, data_dir=None):
     config = load_config(config_path)
     device = torch.device('cpu' if gpu < 0 or not torch.cuda.is_available() else f'cuda:{gpu}')
     dataset_config = config['dataset'][dataset_name]
     dataset = load_dataset(dataset_name,
+                           data_dir=data_dir,
                            min_ui=dataset_config['min_user_interactions'],
                            min_ii=dataset_config['min_item_interactions'])
     backbone = init_backbone(backbone_name, dataset, config, device)
@@ -46,10 +48,25 @@ def benchmark(dataset_name='demo', backbone_name='lightgcn', config_path='config
         users = user.expand_as(items)
         (model(users, items) if method != 'standard' else backbone(users, items))
     inference = time.perf_counter() - inference_started
-    return {'dataset': dataset_name, 'backbone': backbone_name, 'method': method,
-            'time_per_epoch_seconds': total, 'calibration_refresh_seconds': refresh_time,
-            'peak_memory_bytes': int(peak), 'inference_seconds_per_user': inference}
+    result = {'dataset': dataset_name, 'backbone': backbone_name, 'method': method,
+              'time_per_epoch_seconds': total, 'calibration_refresh_seconds': refresh_time,
+              'peak_memory_bytes': int(peak), 'inference_seconds_per_user': inference}
+    if dataset_name == 'demo':
+        result['note'] = 'Demo/smoke-test mode; this output does not reproduce Tables IV-V.'
+    return result
 
 
 if __name__ == '__main__':
-    print(json.dumps(benchmark(), indent=2))
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', default='demo')
+    parser.add_argument('--backbone', default='lightgcn')
+    parser.add_argument('--config', default='config/default.yaml')
+    parser.add_argument('--method', default='dual2fair_lowrank',
+                        choices=['standard', 'dual2fair_lowrank', 'dual2fair_dense'])
+    parser.add_argument('--gpu', type=int, default=-1)
+    parser.add_argument('--data-dir', default=None)
+    args = parser.parse_args()
+    if args.dataset == 'demo':
+        print('Demo/smoke-test mode; this output does not reproduce Tables IV-V.')
+    print(json.dumps(benchmark(args.dataset, args.backbone, args.config,
+                               args.method, args.gpu, args.data_dir), indent=2))

@@ -49,7 +49,7 @@ AVAILABLE_ABLATIONS = {
     },
     'dual2fair': {
         'label': 'Dual2Fair',
-        'config': {'dual2fair.optimization_strategy': 'hierarchical_mirror'},
+        'config': {'dual2fair.optimization_strategy': 'hierarchical_alternating'},
         'status': 'available',
     },
 }

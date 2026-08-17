@@ -114,7 +114,7 @@ dual2fair:
   enable_item_calibration: true
   enable_confidence: true
   alignment_mode: ot
-  optimization_strategy: hierarchical_mirror
+  optimization_strategy: hierarchical_alternating
 evaluation:
   mode: full
   require_uif_reference: true

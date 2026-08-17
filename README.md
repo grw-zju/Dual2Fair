@@ -8,23 +8,21 @@ PyTorch implementation of Dual2Fair for fairness-aware recommendation on sparse-
 pip install -r requirements.txt
 ```
 
-## Data
+## Data availability
 
-### Download
+Due to dataset size and redistribution constraints, the complete datasets are not stored in this repository. Please obtain the original datasets from the sources listed below and follow `docs/data_preparation.md` to reproduce the processed splits used in the paper.
 
-Complete processed datasets can be downloaded from:
+The repository includes the preprocessing, evaluation, and benchmarking code. The lightweight demo data are intended only for interface validation and do not reproduce the numerical results in Tables IV-V.
 
-```text
-https://drive.google.com/drive/folders/1nbI95AFsZG2Oq0cZAYVEBKK8spGpqJ3p?usp=sharing
-```
-
-Place the downloaded files under the corresponding directories in `data/`.
-
-A runnable demo dataset is included at:
+Original data sources:
 
 ```text
-data/demo/interactions.csv
+MovieLens-1M: https://files.grouplens.org/datasets/movielens/ml-1m.zip
+Epinions: https://www.cse.msu.edu/~tangjili/datasetcode/epinions_with_rating_timestamp_txt.zip
+Gowalla: https://huggingface.co/datasets/habedi/gowalla-dataset/resolve/main/original_data/loc-gowalla_totalCheckins.txt.gz?download=true
 ```
+
+Expected data locations are described in `docs/data_preparation.md`.
 
 ### Dataset Statistics
 
@@ -43,6 +41,8 @@ Dual2Fair/
   data/
     dataset_utils.py
     demo/
+  docs/
+    data_preparation.md
   models/
     backbone/
     dual2fair/
@@ -62,7 +62,7 @@ Dual2Fair/
 
 ## Quick Demo
 
-The demo dataset can be used for fast CPU smoke tests:
+The demo dataset can be used for CPU smoke tests:
 
 ```bash
 python run.py --dataset demo --backbone lightgcn --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
@@ -73,6 +73,8 @@ python run.py --dataset demo --backbone vaecf --method dual2fair --eval_mode ful
 ## Running Experiments
 
 ### Main Model
+
+Dual2Fair uses accuracy-first hierarchical alternating optimization.
 
 ```bash
 python run.py --dataset movielens --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config config/default.yaml
@@ -134,6 +136,6 @@ Available method choices are listed in `run.py`.
 
 ```bash
 python scripts/benchmark_efficiency.py
-python scripts/benchmark_scaling.py
+python scripts/benchmark_scaling.py --dataset gowalla --subset-dir results/gowalla_subsets
 python scripts/analyze_cross_side_interference.py
 ```
