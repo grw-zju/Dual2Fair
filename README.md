@@ -32,19 +32,6 @@ data/demo/interactions.csv
 | Epinions | 20,382 | 30,989 | 542,856 | 99.9141% |
 | Gowalla | 29,495 | 40,358 | 2,001,700 | 99.8318% |
 
-## Project Structure
-
-```text
-Dual2Fair/
-  data/
-  models/
-  baseline/
-  evaluation/
-  scripts/
-  tests/
-  run.py
-```
-
 ## Quick Demo
 
 ```bash
@@ -88,16 +75,4 @@ python3 run.py --dataset movielens --backbone lightgcn --method fairdual --eval_
 ```bash
 python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --eval_mode full --gpu 0
 python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode mmd --eval_mode full --gpu 0
-```
-
-### Five Runs
-
-```bash
-python3 scripts/run_five_seeds.py --dataset movielens --backbone lightgcn --method dual2fair --gpu 0
-```
-
-## Tests
-
-```bash
-python3 -m pytest -q
 ```
