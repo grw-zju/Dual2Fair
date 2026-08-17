@@ -47,6 +47,8 @@ class Dual2Fair(nn.Module):
             nystrom_pinv_rtol=settings['nystrom_pinv_rtol'],
             sinkhorn_max_iter=settings['sinkhorn_max_iter'],
             sinkhorn_tol=settings['sinkhorn_tol'], eps0=settings['eps0'],
+            item_solver_mode=settings.get('item_solver_mode', 'lowrank'),
+            dense_max_items=settings.get('dense_max_items', 5000),
             random_state=seed)
         self.enable_user_calibration = settings.get('enable_user_calibration', True)
         self.enable_item_calibration = settings.get('enable_item_calibration', True)

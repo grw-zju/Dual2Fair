@@ -1,0 +1,33 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS/editor files
+.DS_Store
+.~*
+
+# Local data and generated experiment artifacts
+data/epinions/
+data/gowalla/
+data/movielens/
+results/
+saved_models/
+external_baselines/
+SIGIR2025_ref/
+SIGIR2025.zip
+TKDE_2026.pdf
+processed_data.tar.gz
+*.docx
+*.pptx
+fairness_figure.pdf
+fairness_figure.png
+intro.py
+tf_intro/
+tf_rq3/
+tf_rq4/
+tf_rq5/
+
+# Keep lightweight demo data
+!data/demo/
+!data/demo/interactions.csv

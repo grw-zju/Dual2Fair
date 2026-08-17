@@ -1,8 +1,9 @@
 import torch
 
 from models.dual2fair.sinkhorn import (
-    build_adaptive_nystrom_state, compute_lowrank_barycenter,
-    lowrank_matvec, solve_item_sinkhorn_lowrank)
+    build_adaptive_nystrom_state, compute_dense_barycenter,
+    compute_lowrank_barycenter, lowrank_matvec, solve_item_sinkhorn_dense,
+    solve_item_sinkhorn_lowrank)
 
 
 def explicit_kernel(state):
@@ -43,3 +44,16 @@ def test_lowrank_sinkhorn_and_barycenter_match_explicit_state():
     expected = coupling @ items / coupling.sum(1, keepdim=True)
     actual = compute_lowrank_barycenter(state, items)
     assert torch.allclose(actual, expected, atol=1e-5)
+
+
+def test_dense_sinkhorn_reference_path_marginals_and_barycenter():
+    items = torch.nn.functional.normalize(torch.randn(5, 3), dim=1)
+    source = torch.full((5,), 1 / 5.)
+    target = torch.tensor([.1, .2, .2, .2, .3])
+    state = solve_item_sinkhorn_dense(items, source, target, epsilon_v=0.6,
+                                      max_iter=1000, tolerance=1e-6)
+    assert torch.allclose(state.plan.sum(1), source, atol=2e-3)
+    assert torch.allclose(state.plan.sum(0), target, atol=2e-3)
+    expected = state.plan @ items / state.plan.sum(1, keepdim=True)
+    actual = compute_dense_barycenter(state, items)
+    assert torch.allclose(actual, expected, atol=1e-6)

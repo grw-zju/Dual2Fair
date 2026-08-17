@@ -10,21 +10,23 @@ pip install -r requirements.txt
 
 ## Data
 
-### Download
-
-The complete processed datasets are not stored in this repository. Download the processed data package from Google Drive and place the files under `data/`:
+The complete processed datasets are distributed separately and are not stored in GitHub.
+Download the processed package from Google Drive and place it under `data/`:
 
 ```text
 https://drive.google.com/drive/folders/1nbI95AFsZG2Oq0cZAYVEBKK8spGpqJ3p?usp=sharing
 ```
 
-A lightweight demo dataset is included at:
+Expected layout:
 
 ```text
+data/movielens/ml-1m/ratings.dat
+data/epinions/epinion_with_rating_timestamp_txt/rating_with_timestamp.txt
+data/gowalla/loc-gowalla_totalCheckins.txt
 data/demo/interactions.csv
 ```
 
-### Dataset Statistics
+The bundled demo data are for smoke tests only and do not reproduce paper tables.
 
 | Dataset | Users | Items | Interactions | Sparsity |
 |---|---:|---:|---:|---:|
@@ -32,47 +34,91 @@ data/demo/interactions.csv
 | Epinions | 20,382 | 30,989 | 542,856 | 99.9141% |
 | Gowalla | 29,495 | 40,358 | 2,001,700 | 99.8318% |
 
-## Quick Demo
+Verify a downloaded data package:
+
+```bash
+python3 scripts/verify_data_package.py --data-root data
+```
+
+## Quick demo / smoke test
 
 ```bash
 python3 run.py --dataset demo --backbone lightgcn --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
-python3 run.py --dataset demo --backbone neumf --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
-python3 run.py --dataset demo --backbone vaecf --method dual2fair --eval_mode full --gpu -1 --allow-missing-uif-reference
 ```
 
-## Running Experiments
+## Reproducing the paper experiments
 
-### Main Model
+Paper configs are in `configs/`.
+
+### Main model
 
 ```bash
-python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --eval_mode full --gpu 0
-python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --eval_mode full --gpu 0
-python3 run.py --dataset gowalla --backbone lightgcn --method dual2fair --eval_mode full --gpu 0
+python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config configs/paper_lightgcn.yaml
+python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config configs/paper_lightgcn.yaml
+python3 run.py --dataset gowalla --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config configs/paper_lightgcn.yaml
 ```
 
-Supported datasets:
+Supported datasets: `movielens`, `epinions`, `gowalla`, `demo`.
+Supported backbones: `lightgcn`, `neumf`, `vaecf`.
 
-```text
-movielens, epinions, gowalla, demo
-```
+### UIF reference construction
 
-Supported backbones:
-
-```text
-lightgcn, neumf, vaecf
-```
-
-### Baselines
+Build split-specific Standard references from five Standard runs:
 
 ```bash
-python3 run.py --dataset movielens --backbone lightgcn --method standard --eval_mode full --gpu 0
-python3 run.py --dataset movielens --backbone lightgcn --method dpr --eval_mode full --gpu 0
-python3 run.py --dataset movielens --backbone lightgcn --method fairdual --eval_mode full --gpu 0
+python3 scripts/build_uif_references.py results/standard_seed_42.json results/standard_seed_43.json results/standard_seed_44.json results/standard_seed_45.json results/standard_seed_46.json --output results/uif_reference.json
 ```
 
-### Ablations
+Use the reference file in later runs:
 
 ```bash
-python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --eval_mode full --gpu 0
-python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode mmd --eval_mode full --gpu 0
+python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --uif-reference-file results/uif_reference.json --config configs/paper_lightgcn.yaml
+```
+
+### Five-seed execution
+
+```bash
+python3 scripts/run_five_seeds.py --dataset movielens --backbone lightgcn --method dual2fair --config configs/paper_lightgcn.yaml
+```
+
+### Hyperparameter selection
+
+```bash
+python3 scripts/select_paper_config.py --standard-aggregate results/standard_val_aggregate.json --candidate results/dual2fair_l1_0.1_l2_0.1_val_aggregate.json --output results/selected_config.json
+```
+
+### Baselines and ablations
+
+```bash
+python3 run.py --dataset movielens --backbone lightgcn --method standard --eval_mode full --gpu 0 --config configs/paper_lightgcn.yaml
+python3 run.py --dataset movielens --backbone lightgcn --method dpr --eval_mode full --gpu 0 --config configs/paper_lightgcn.yaml
+python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --eval_mode full --gpu 0 --config configs/paper_lightgcn.yaml
+python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode mmd --eval_mode full --gpu 0 --config configs/paper_lightgcn.yaml
+```
+
+### Table IV efficiency benchmark
+
+```bash
+python3 scripts/benchmark_efficiency.py --dataset movielens --backbone lightgcn --method standard --gpu 0 --config configs/paper_lightgcn.yaml --output-json results/table4_standard.json
+python3 scripts/benchmark_efficiency.py --dataset movielens --backbone lightgcn --method dual2fair_lowrank --gpu 0 --config configs/paper_lightgcn.yaml --output-json results/table4_lowrank.json
+```
+
+Dense mode is an explicit reference/benchmark path and should only be used when the catalog is small enough:
+
+```bash
+python3 scripts/benchmark_efficiency.py --dataset movielens --backbone lightgcn --method dual2fair_dense --gpu 0 --config configs/paper_lightgcn.yaml
+```
+
+### Table V Gowalla scaling benchmark
+
+Exact Gowalla scaling inputs must come from the external processed-data package. The script fails if exact subsets or manifests are missing.
+
+```bash
+python3 scripts/benchmark_scaling.py --subset-dir data/gowalla_scaling --gpu 0 --config configs/paper_lightgcn.yaml --output-json results/table5_scaling.json
+```
+
+## Tests
+
+```bash
+python3 -m pytest -q
 ```

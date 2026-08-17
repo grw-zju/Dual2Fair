@@ -88,6 +88,8 @@ DEFAULT_CONFIG = {
         'nystrom_tol': 1e-3,
         'nystrom_num_strata': 5,
         'nystrom_pinv_rtol': 1e-6,
+        'item_solver_mode': 'lowrank',
+        'dense_max_items': 5000,
         'sinkhorn_max_iter': 100,
         'sinkhorn_tol': 1e-3,
         'fairness_learning_rate': 5e-4,
@@ -109,7 +111,7 @@ DEFAULT_CONFIG = {
         'seeds': [42, 43, 44, 45, 46],
     },
     'grid_search': {
-        'ndcg_drop_tolerance': 0.01,
+        'ndcg_retention_ratio': 0.98,
         'lambda1_range': [0.01, 0.05, 0.1, 0.5, 1, 10],
         'lambda2_range': [0.01, 0.05, 0.1, 0.5, 1, 10],
     },
@@ -137,13 +139,40 @@ DEFAULT_CONFIG = {
 }
 
 
+def _deep_update(base, override):
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 def load_config(config_path):
     if config_path and os.path.exists(config_path):
         with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
+            loaded = yaml.safe_load(f)
+        return _deep_update(copy.deepcopy(DEFAULT_CONFIG), loaded)
     if config_path in {None, '', 'config/default.yaml'}:
         return copy.deepcopy(DEFAULT_CONFIG)
     raise FileNotFoundError(config_path)
+
+
+def apply_uif_reference_file(config, path):
+    if not path:
+        return config
+    with open(path, 'r') as handle:
+        reference = yaml.safe_load(handle)
+    evaluation = config.setdefault('evaluation', {})
+    refs = evaluation.setdefault('uif_references', {})
+    for source, target in (('validation', 'val'), ('val', 'val'), ('test', 'test')):
+        if source in reference:
+            block = reference[source]
+            refs[target] = {
+                'DUF': block.get('DUF_ref', block.get('DUF')),
+                'DIF': block.get('DIF_ref', block.get('DIF')),
+            }
+    return config
 
 
 def sample_negatives(dataset, n_neg=1):
@@ -394,7 +423,7 @@ def compute_baseline_fair_loss(baseline_name, baseline_obj, backbone, dataset,
 
 
 def train_standard(dataset, backbone_name, config, device, eval_mode='full',
-                   loss_type='bce', save_path=None):
+                   loss_type='bce', save_path=None, evaluation_stage='both'):
     backbone = init_backbone(backbone_name, dataset, config, device)
     backbone._backbone_name_hint = backbone_name
 
@@ -459,9 +488,14 @@ def train_standard(dataset, backbone_name, config, device, eval_mode='full',
         backbone.load_state_dict(best_state)
         if hasattr(backbone, '_clear_cache'):
             backbone._clear_cache()
-    test_results = evaluate_model(backbone, test_evaluator, backbone_name, eval_mode)
     print(f"[Standard/{backbone_name}] Best val: {best_results}")
-    print(f"[Standard/{backbone_name}] Test: {test_results}")
+    if evaluation_stage == 'validation':
+        test_results = dict(best_results)
+        test_results['evaluation_stage'] = 'validation'
+    else:
+        test_results = evaluate_model(backbone, test_evaluator, backbone_name, eval_mode)
+        test_results['evaluation_stage'] = 'test'
+        print(f"[Standard/{backbone_name}] Test: {test_results}")
     user_embs = backbone.get_user_embeddings().detach().cpu().numpy()
     item_embs = backbone.get_item_embeddings().detach().cpu().numpy()
     backbone._best_validation_results = best_results
@@ -469,7 +503,8 @@ def train_standard(dataset, backbone_name, config, device, eval_mode='full',
 
 
 def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2=0.1,
-                    eval_mode='full', loss_type='bpr', save_path=None):
+                    eval_mode='full', loss_type='bpr', save_path=None,
+                    evaluation_stage='both'):
     backbone = init_backbone(backbone_name, dataset, config, device)
     backbone._backbone_name_hint = backbone_name
     model = Dual2Fair(backbone, dataset, config, device, backbone_name).to(device)
@@ -568,7 +603,12 @@ def train_dual2fair(dataset, backbone_name, config, device, lambda1=0.1, lambda2
         raise RuntimeError('No Dual2Fair checkpoint selected')
     model.load_checkpoint_state(best_checkpoint)
     model.eval(); model.build_calibrated_embeddings()
-    test_results = test_evaluator.evaluate(model=model)
+    if evaluation_stage == 'validation':
+        test_results = dict(best_results)
+        test_results['evaluation_stage'] = 'validation'
+    else:
+        test_results = test_evaluator.evaluate(model=model)
+        test_results['evaluation_stage'] = 'test'
     output = model.build_calibrated_embeddings()
     model._best_validation_results = best_results
     model._validation_trajectory = validation_trajectory
@@ -1081,9 +1121,12 @@ def main():
                         choices=['ot', 'hard', 'mmd'])
     parser.add_argument('--eval_mode', type=str, default='full',
                         choices=['sampled', 'full'])
+    parser.add_argument('--evaluation-stage', type=str, default='both',
+                        choices=['validation', 'test', 'both'])
     parser.add_argument('--loss_type', type=str, default='bpr',
                         choices=['bce', 'bpr'])
     parser.add_argument('--config', type=str, default='')
+    parser.add_argument('--uif-reference-file', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--seeds', type=int, nargs='+', default=None)
     parser.add_argument('--split-seed', type=int, default=2026)
@@ -1096,6 +1139,7 @@ def main():
 
     set_seed(args.seed)
     config = load_config(args.config)
+    apply_uif_reference_file(config, args.uif_reference_file)
     if args.alignment_mode is not None:
         config.setdefault('dual2fair', {})['alignment_mode'] = args.alignment_mode
     if args.allow_missing_uif_reference:
@@ -1111,10 +1155,13 @@ def main():
                        '--backbone', args.backbone, '--method', args.method,
                        '--lambda1', str(args.lambda1), '--lambda2', str(args.lambda2),
                        '--eval_mode', args.eval_mode, '--loss_type', args.loss_type,
+                       '--evaluation-stage', args.evaluation_stage,
                        '--config', args.config, '--seed', str(model_seed),
                        '--split-seed', str(args.split_seed), '--gpu', str(args.gpu),
                        '--save_dir', args.save_dir, '--results_dir', args.results_dir,
                        '--output-suffix', f'_seed{model_seed}']
+            if args.uif_reference_file:
+                command.extend(['--uif-reference-file', args.uif_reference_file])
             if args.alignment_mode is not None:
                 command.extend(['--alignment_mode', args.alignment_mode])
             if args.allow_missing_uif_reference:
@@ -1160,11 +1207,12 @@ def main():
 
     if args.method == 'standard':
         backbone, user_embs, item_embs, ndcg, results = train_standard(
-            dataset, args.backbone, config, device, args.eval_mode, args.loss_type, save_path)
+            dataset, args.backbone, config, device, args.eval_mode, args.loss_type,
+            save_path, args.evaluation_stage)
     elif args.method == 'dual2fair':
         backbone, user_embs, item_embs, ndcg, results = train_dual2fair(
             dataset, args.backbone, config, device, args.lambda1, args.lambda2,
-            args.eval_mode, args.loss_type, save_path)
+            args.eval_mode, args.loss_type, save_path, args.evaluation_stage)
     else:
         backbone, results = train_baseline(
             dataset, args.backbone, args.method, config, device, args.eval_mode, args.loss_type, save_path)
@@ -1180,6 +1228,7 @@ def main():
         'evaluation_seed': seed_config.get('evaluation', 42),
         'split_hash': dataset.split_hash,
         'eval_mode': args.eval_mode,
+        'evaluation_stage': args.evaluation_stage,
         'loss_type': args.loss_type,
         'alignment_mode': config.get('dual2fair', {}).get('alignment_mode'),
         'mmd_kernel': ('linear' if config.get('dual2fair', {}).get('alignment_mode') == 'mmd'

@@ -5,6 +5,12 @@ import torch.nn.functional as F
 
 
 @dataclass
+class DenseTransportState:
+    plan: torch.Tensor
+    row_masses: torch.Tensor
+
+
+@dataclass
 class LowRankTransportState:
     F: torch.Tensor
     A_pinv: torch.Tensor
@@ -109,6 +115,35 @@ def compute_lowrank_fixed_coupling_cost(state, source_items, target_anchors):
     transported = state.a[:, None] * torch.stack(
         [lowrank_matvec(state, weighted_targets[:, dim])
          for dim in range(weighted_targets.shape[1])], dim=1)
+    return state.row_masses.sum() - (source_items * transported).sum()
+
+
+def solve_item_sinkhorn_dense(normalized_items, source, target, epsilon_v=0.1,
+                              max_iter=100, tolerance=1e-3, eps0=1e-8):
+    items = F.normalize(normalized_items, dim=1)
+    source = source / source.sum().clamp_min(eps0)
+    target = target / target.sum().clamp_min(eps0)
+    kernel = torch.exp(-(1.0 - items @ items.T) / epsilon_v)
+    a = torch.ones_like(source)
+    b = torch.ones_like(target)
+    for _ in range(max_iter):
+        a = source / (kernel @ b).clamp_min(eps0)
+        b = target / (kernel.T @ a).clamp_min(eps0)
+        plan = a[:, None] * kernel * b[None, :]
+        violation = max((plan.sum(1) - source).abs().max().item(),
+                        (plan.sum(0) - target).abs().max().item())
+        if violation <= tolerance:
+            break
+    plan = (a[:, None] * kernel * b[None, :]).detach()
+    return DenseTransportState(plan=plan, row_masses=plan.sum(1))
+
+
+def compute_dense_barycenter(state, target_anchors, eps0=1e-8):
+    return (state.plan @ target_anchors) / state.row_masses[:, None].clamp_min(eps0)
+
+
+def compute_dense_fixed_coupling_cost(state, source_items, target_anchors):
+    transported = state.plan @ target_anchors
     return state.row_masses.sum() - (source_items * transported).sum()
 
 

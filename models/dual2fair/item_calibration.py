@@ -4,8 +4,11 @@ import torch.nn.functional as F
 
 from .alignment import hard_item_match_blockwise, linear_mmd_loss, linear_mmd_state
 from .sinkhorn import (build_adaptive_nystrom_state,
+                       compute_dense_barycenter,
+                       compute_dense_fixed_coupling_cost,
                        compute_lowrank_barycenter,
                        compute_lowrank_fixed_coupling_cost,
+                       solve_item_sinkhorn_dense,
                        solve_item_sinkhorn_lowrank)
 
 
@@ -16,7 +19,8 @@ class ItemRepresentationCalibration(nn.Module):
                  nystrom_max_rank=256, nystrom_tol=1e-3,
                  nystrom_num_strata=5, nystrom_pinv_rtol=1e-6,
                  sinkhorn_max_iter=100, sinkhorn_tol=1e-3,
-                 eps0=1e-8, random_state=42, **deprecated):
+                 eps0=1e-8, random_state=42, item_solver_mode='lowrank',
+                 dense_max_items=5000, **deprecated):
         super().__init__()
         self.epsilon_v = float(epsilon_v)
         self.tau_v = float(tau_v)
@@ -33,6 +37,8 @@ class ItemRepresentationCalibration(nn.Module):
         self.sinkhorn_tol = float(sinkhorn_tol)
         self.eps0 = float(eps0)
         self.random_state = int(random_state)
+        self.item_solver_mode = item_solver_mode
+        self.dense_max_items = int(dense_max_items)
         self.W_v = nn.Linear(representation_dim, representation_dim, bias=False)
         self.P_v = nn.Linear(representation_dim, representation_dim, bias=False)
         nn.init.eye_(self.W_v.weight)
@@ -84,15 +90,23 @@ class ItemRepresentationCalibration(nn.Module):
         self.target_anchors = anchors
         self.calibration_x = x.detach()
         if alignment_mode == 'ot':
-            state = build_adaptive_nystrom_state(
-                anchors, frequencies, self.epsilon_v,
-                self.nystrom_initial_rank, self.nystrom_max_rank,
-                self.nystrom_tol, self.nystrom_num_strata,
-                self.nystrom_pinv_rtol, self.random_state)
-            state = solve_item_sinkhorn_lowrank(
-                state, source, target, self.sinkhorn_max_iter,
-                self.sinkhorn_tol, self.eps0)
-            barycenters = compute_lowrank_barycenter(state, anchors, self.eps0)
+            if self.item_solver_mode == 'dense':
+                if len(anchors) > self.dense_max_items:
+                    raise RuntimeError('Dense item OT exceeds dense_max_items safety guard')
+                state = solve_item_sinkhorn_dense(
+                    anchors, source, target, self.epsilon_v,
+                    self.sinkhorn_max_iter, self.sinkhorn_tol, self.eps0)
+                barycenters = compute_dense_barycenter(state, anchors, self.eps0)
+            else:
+                state = build_adaptive_nystrom_state(
+                    anchors, frequencies, self.epsilon_v,
+                    self.nystrom_initial_rank, self.nystrom_max_rank,
+                    self.nystrom_tol, self.nystrom_num_strata,
+                    self.nystrom_pinv_rtol, self.random_state)
+                state = solve_item_sinkhorn_lowrank(
+                    state, source, target, self.sinkhorn_max_iter,
+                    self.sinkhorn_tol, self.eps0)
+                barycenters = compute_lowrank_barycenter(state, anchors, self.eps0)
             self.transport_state = state
             self.barycentric_targets_cache = barycenters.detach()
             return state
@@ -125,6 +139,9 @@ class ItemRepresentationCalibration(nn.Module):
     def fixed_coupling_loss(self, item_representations):
         x = self.calibration_space(item_representations)
         if self.alignment_mode == 'ot':
+            if self.item_solver_mode == 'dense':
+                return compute_dense_fixed_coupling_cost(
+                    self.transport_state, x, self.target_anchors.detach())
             return compute_lowrank_fixed_coupling_cost(
                 self.transport_state, x, self.target_anchors.detach())
         if self.alignment_mode == 'hard':
