@@ -43,7 +43,7 @@ def check_dataset(name):
         'observed': observed,
         'expected_statistics': EXPECTED[name],
         'matches': observed == EXPECTED[name],
-        'status': 'aligned' if observed == EXPECTED[name] else 'requires result reproduction check',
+        'status': 'aligned' if observed == EXPECTED[name] else 'statistics mismatch',
     }
 
 

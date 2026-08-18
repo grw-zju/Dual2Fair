@@ -995,7 +995,7 @@ def train_baseline(dataset, backbone_name, baseline_name, config, device,
     if proc_type == 'unavailable-external':
         raise NotImplementedError(
             f'{baseline_name} exact implementation is not available locally; '
-            'provide an official adapter before running reproduction.')
+            'provide an official adapter before running this baseline.')
     if proc_type == 'post-processing':
         return train_postprocessing_baseline(dataset, backbone_name, baseline_name,
                                              config, device, eval_mode, loss_type, save_path)
