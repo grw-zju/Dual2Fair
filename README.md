@@ -70,8 +70,6 @@ Supported `METHOD_NAME` values:
 standard, ufr, hyperuof, dpr, fairdual, cpfair, multifr, ada2fair, fair, fairsort, popularity_ips, esam, mgl
 ```
 
-ESAM and MGL use external official-repository adapters. Supply their `repo_path` and `command` fields in the corresponding baseline configuration before running them.
-
 ### Ablations
 
 Generic command:
