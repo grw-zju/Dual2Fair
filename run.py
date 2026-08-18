@@ -1154,6 +1154,8 @@ def main():
                     f"DIF={results.get('DIF', 0):.6f}"]
     if results.get('UIF') is not None:
         metric_parts.append(f"UIF={results['UIF']:.6f}")
+    else:
+        metric_parts.append("UIF=unavailable")
     print("\nFinal Results: " + ", ".join(metric_parts))
     print(f"Results saved to {results_path}")
 

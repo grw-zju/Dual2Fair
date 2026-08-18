@@ -2,7 +2,11 @@
 
 PyTorch implementation for **Decoupled User–Item Representation Calibration for Two-Sided Fairness in Recommendation**.
 
-## Installation
+## Requirements
+
+- Python 3.8+
+- PyTorch 1.12+
+- CUDA GPU is recommended for full datasets; CPU is sufficient for the bundled demo.
 
 ```bash
 pip install -r requirements.txt
@@ -10,8 +14,7 @@ pip install -r requirements.txt
 
 ## Data
 
-The complete processed datasets are distributed separately and are not stored in GitHub.
-Download the processed package from Google Drive and place it under `data/`:
+Download the processed data package from Google Drive and place it under `data/`:
 
 ```text
 https://drive.google.com/drive/folders/1nbI95AFsZG2Oq0cZAYVEBKK8spGpqJ3p?usp=sharing
@@ -26,7 +29,7 @@ data/gowalla/loc-gowalla_totalCheckins.txt
 data/demo/interactions.csv
 ```
 
-The bundled demo data are for demo runs only and do not reproduce reported tables.
+The bundled demo data are only for checking that the code executes.
 
 | Dataset | Users | Items | Interactions | Sparsity |
 |---|---:|---:|---:|---:|
@@ -34,91 +37,59 @@ The bundled demo data are for demo runs only and do not reproduce reported table
 | Epinions | 20,382 | 30,989 | 542,856 | 99.9141% |
 | Gowalla | 29,495 | 40,358 | 2,001,700 | 99.8318% |
 
-Verify a downloaded data package:
-
-```bash
-python3 scripts/verify_data_package.py --data-root data
-```
-
 ## Quick Demo
 
 ```bash
-python3 run.py --dataset demo --backbone lightgcn --method dual2fair --eval_mode full --gpu -1 --config configs/demo.yaml
+python3 run.py --dataset demo --backbone lightgcn --method dual2fair --config configs/demo.yaml --gpu -1
 ```
 
-## Reproducing the paper experiments
+## Running Experiments
 
-The default configuration is `configs/default.yaml`.
-
-### Main model
+### Main Model
 
 ```bash
-python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config configs/default.yaml
-python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config configs/default.yaml
-python3 run.py --dataset gowalla --backbone lightgcn --method dual2fair --eval_mode full --gpu 0 --config configs/default.yaml
+python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --config configs/default.yaml --gpu 0
+python3 run.py --dataset movielens --backbone neumf --method dual2fair --config configs/default.yaml --gpu 0
+python3 run.py --dataset movielens --backbone vaecf --method dual2fair --config configs/default.yaml --gpu 0
 ```
 
 Supported datasets: `movielens`, `epinions`, `gowalla`, `demo`.
 Supported backbones: `lightgcn`, `neumf`, `vaecf`.
 
-### UIF reference construction
+### Baselines
 
-Build split-specific Standard references from five Standard runs:
+Generic command:
 
 ```bash
-python3 scripts/build_uif_reference.py results/standard_seed_42.json results/standard_seed_43.json results/standard_seed_44.json results/standard_seed_45.json results/standard_seed_46.json --output results/uif_reference.json
+python3 run.py --dataset movielens --backbone lightgcn --method METHOD_NAME --config configs/default.yaml --gpu 0
 ```
 
-Use the reference file in later runs:
+Supported `METHOD_NAME` values:
 
-```bash
-python3 run.py --dataset movielens --backbone lightgcn --method dual2fair --uif-reference-file results/uif_reference.json --config configs/default.yaml
+```text
+standard, ufr, hyperuof, dpr, fairdual, cpfair, multifr, ada2fair, fair, fairsort, popularity_ips, esam, mgl
 ```
 
-### Five-seed execution
+ESAM and MGL use external official-repository adapters. Supply their `repo_path` and `command` fields in the corresponding baseline configuration before running them.
+
+### Ablations
+
+Generic command:
 
 ```bash
-python3 scripts/run_multi_seed.py --dataset movielens --backbone lightgcn --method dual2fair --config configs/default.yaml
+python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --config configs/default.yaml --gpu 0
 ```
 
-### Hyperparameter selection
+Supported executable variants:
 
-```bash
-python3 scripts/select_hyperparameters.py --standard-aggregate results/standard_val_aggregate.json --candidate results/dual2fair_l1_0.1_l2_0.1_val_aggregate.json --output results/selected_config.json
-```
-
-### Baselines and ablations
-
-```bash
-python3 run.py --dataset movielens --backbone lightgcn --method standard --eval_mode full --gpu 0 --config configs/default.yaml
-python3 run.py --dataset movielens --backbone lightgcn --method dpr --eval_mode full --gpu 0 --config configs/default.yaml
-python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode hard --eval_mode full --gpu 0 --config configs/default.yaml
-python3 run.py --dataset epinions --backbone lightgcn --method dual2fair --alignment_mode mmd --eval_mode full --gpu 0 --config configs/default.yaml
-```
-
-### Table IV efficiency benchmark
-
-```bash
-python3 scripts/run_efficiency.py --dataset movielens --backbone lightgcn --method standard --gpu 0 --config configs/default.yaml --output-json results/table4_standard.json
-python3 scripts/run_efficiency.py --dataset movielens --backbone lightgcn --method dual2fair_lowrank --gpu 0 --config configs/default.yaml --output-json results/table4_lowrank.json
-```
-
-Dense mode is an explicit reference/benchmark path and should only be used when the catalog is small enough:
-
-```bash
-python3 scripts/run_efficiency.py --dataset movielens --backbone lightgcn --method dual2fair_dense --gpu 0 --config configs/default.yaml
-```
-
-### Table V Gowalla scaling benchmark
-
-Exact Gowalla scaling inputs must come from the external processed-data package. The script fails if exact subsets or manifests are missing.
-
-```bash
-python3 scripts/run_scaling.py --subset-dir data/gowalla_scaling --gpu 0 --config configs/default.yaml --output-json results/table5_scaling.json
-```
-
-## Tests
-
-```bash
-python3 -m pytest -q
+```text
+w/o URC:              dual2fair.enable_user_calibration = false
+w/o IRC:              dual2fair.enable_item_calibration = false
+Uniform Target:       dual2fair.omega = 1.0
+Merit Only:           dual2fair.omega = 0.0
+w/o Confidence:       dual2fair.enable_confidence = false
+Joint Weighted Sum:   dual2fair.optimization_strategy = joint_weighted_sum
+Standard Alternating: dual2fair.optimization_strategy = standard_alternating
+Hard Matching:        --alignment_mode hard
+MMD Alignment:        --alignment_mode mmd
 ```
