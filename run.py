@@ -19,7 +19,7 @@ from models.backbone import get_backbone, NeuMF, VAECF, LightGCN
 from models.dual2fair import Dual2Fair
 from models.dual2fair.hierarchical_opt import HierarchicalAlternatingOptimizer
 from evaluation.evaluator import Evaluator
-from baseline import BASELINES, CATEGORIES, PROCESSING_TYPES
+from baselines import BASELINES, CATEGORIES, PROCESSING_TYPES
 
 
 def set_seed(seed):
@@ -30,7 +30,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'default.yaml')
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'configs', 'default.yaml')
 
 
 def _deep_update(base, override):
@@ -44,7 +44,7 @@ def _deep_update(base, override):
 
 def load_config(config_path=None):
     path = config_path or DEFAULT_CONFIG_PATH
-    if path == 'config/default.yaml':
+    if path == 'configs/default.yaml':
         path = DEFAULT_CONFIG_PATH
     with open(path, 'r') as f:
         return yaml.safe_load(f)
@@ -1025,13 +1025,13 @@ def main():
                         choices=['validation', 'test', 'both'])
     parser.add_argument('--loss_type', type=str, default='bpr',
                         choices=['bce', 'bpr'])
-    parser.add_argument('--config', type=str, default='config/default.yaml')
+    parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--uif-reference-file', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--seeds', type=int, nargs='+', default=None)
     parser.add_argument('--split-seed', type=int, default=2026)
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--save_dir', type=str, default='saved_models')
+    parser.add_argument('--save_dir', type=str, default='checkpoints')
     parser.add_argument('--results_dir', type=str, default='results')
     parser.add_argument('--output-suffix', type=str, default='')
     parser.add_argument('--allow-missing-uif-reference', action='store_true')
@@ -1046,7 +1046,7 @@ def main():
         config.setdefault('evaluation', {})['require_uif_reference'] = False
     if args.seeds:
         import subprocess
-        from scripts.run_five_seeds import aggregate_runs
+        from scripts.run_multi_seed import aggregate_runs
         if len(args.seeds) != 5 or len(set(args.seeds)) != 5:
             raise ValueError('Aggregation requires exactly five distinct model seeds')
         aggregate = []
@@ -1058,8 +1058,7 @@ def main():
                        '--evaluation-stage', args.evaluation_stage,
                        '--config', args.config, '--seed', str(model_seed),
                        '--split-seed', str(args.split_seed), '--gpu', str(args.gpu),
-                       '--save_dir', args.save_dir, '--results_dir', args.results_dir,
-                       '--output-suffix', f'_seed{model_seed}']
+                       '--save_dir', args.save_dir, '--results_dir', args.results_dir]
             if args.uif_reference_file:
                 command.extend(['--uif-reference-file', args.uif_reference_file])
             if args.alignment_mode is not None:
@@ -1067,8 +1066,8 @@ def main():
             if args.allow_missing_uif_reference:
                 command.append('--allow-missing-uif-reference')
             subprocess.run(command, check=True)
-            result_path = os.path.join(args.results_dir,
-                                       f'{args.dataset}_{args.backbone}_{args.method}_seed{model_seed}.json')
+            result_path = os.path.join(args.results_dir, args.dataset, args.backbone,
+                                       args.method, f'seed_{model_seed}.json')
             with open(result_path, 'r') as handle:
                 result = json.load(handle)
             aggregate.append(result)
@@ -1076,8 +1075,8 @@ def main():
         summary.update({
             'split_seed': args.split_seed,
             'selected_hyperparameters': {'lambda1': args.lambda1, 'lambda2': args.lambda2}})
-        summary_path = os.path.join(args.results_dir,
-                                    f'{args.dataset}_{args.backbone}_{args.method}_aggregate.json')
+        summary_path = os.path.join(args.results_dir, args.dataset, args.backbone,
+                                    args.method, 'aggregate.json')
         with open(summary_path, 'w') as handle:
             json.dump(summary, handle, indent=2)
         print(f'Multi-seed summary saved to {summary_path}')
@@ -1100,10 +1099,11 @@ def main():
     print(f"Dataset: {args.dataset}, Users: {dataset.n_users}, Items: {dataset.n_items}, "
           f"Interactions: {len(dataset.interactions)}")
 
-    os.makedirs(args.save_dir, exist_ok=True)
-    os.makedirs(args.results_dir, exist_ok=True)
-    save_path = os.path.join(args.save_dir,
-                             f"{args.dataset}_{args.backbone}_{args.method}{args.output_suffix}.pt")
+    run_results_dir = os.path.join(args.results_dir, args.dataset, args.backbone, args.method)
+    run_checkpoint_dir = os.path.join(args.save_dir, args.dataset, args.backbone, args.method)
+    os.makedirs(run_checkpoint_dir, exist_ok=True)
+    os.makedirs(run_results_dir, exist_ok=True)
+    save_path = os.path.join(run_checkpoint_dir, f"seed_{args.seed}{args.output_suffix}.pt")
 
     if args.method == 'standard':
         backbone, user_embs, item_embs, ndcg, results = train_standard(
@@ -1144,8 +1144,7 @@ def main():
         results['validation_results'] = backbone._best_validation_results
     if hasattr(backbone, '_validation_trajectory'):
         results['validation_trajectory'] = backbone._validation_trajectory
-    results_path = os.path.join(args.results_dir,
-                                f"{args.dataset}_{args.backbone}_{args.method}{args.output_suffix}.json")
+    results_path = os.path.join(run_results_dir, f"seed_{args.seed}{args.output_suffix}.json")
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
 

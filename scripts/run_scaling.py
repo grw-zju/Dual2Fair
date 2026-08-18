@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.benchmark_efficiency import benchmark
+from scripts.run_efficiency import benchmark
 
 
 EXPECTED_ITEM_COUNTS = {20: 8072, 40: 16143, 60: 24215, 80: 32286, 100: 40358}
@@ -58,12 +58,12 @@ def validate_subset(root, fraction):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run Table-V scaling benchmark from external Gowalla subset inputs.')
+    parser = argparse.ArgumentParser(description='Run Gowalla catalog-scaling benchmark.')
     parser.add_argument('--dataset', default='gowalla', choices=['gowalla'])
     parser.add_argument('--subset-dir', required=True,
                         help='Directory containing 20/40/60/80/100 Gowalla subset folders')
     parser.add_argument('--backbone', default='lightgcn')
-    parser.add_argument('--config', default='config/default.yaml')
+    parser.add_argument('--config', default='configs/default.yaml')
     parser.add_argument('--method', default='dual2fair_lowrank',
                         choices=['standard', 'dual2fair_lowrank', 'dual2fair_dense'])
     parser.add_argument('--gpu', type=int, default=-1)
@@ -74,8 +74,7 @@ def main():
         subsets = [validate_subset(args.subset_dir, fraction)
                    for fraction in EXPECTED_ITEM_COUNTS]
     except Exception as exc:
-        print(str(exc) + '. Prepare exact external Gowalla subsets from the processed data package; this script does not invent subset manifests or reuse demo data.',
-              file=sys.stderr)
+        print(str(exc), file=sys.stderr)
         sys.exit(1)
 
     results = []
@@ -83,8 +82,13 @@ def main():
         data_dir = os.path.dirname(subset['path'])
         result = benchmark(args.dataset, args.backbone, args.config,
                            args.method, args.gpu, data_dir=data_dir)
-        result.update(subset)
-        results.append(result)
+        results.append({
+            'catalog_fraction': subset['fraction'],
+            'num_items': subset['item_count'],
+            'calibration_time': result['calibration_refresh_seconds'],
+            'peak_memory': result['peak_memory_bytes'],
+            'data_dir': data_dir,
+        })
     if args.output_json:
         os.makedirs(os.path.dirname(os.path.abspath(args.output_json)), exist_ok=True)
         with open(args.output_json, 'w') as handle:

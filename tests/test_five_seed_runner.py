@@ -1,6 +1,6 @@
 import pytest
 
-from scripts.run_five_seeds import aggregate_runs
+from scripts.run_multi_seed import aggregate_runs
 
 
 def test_five_seed_aggregation_requires_matching_metadata():

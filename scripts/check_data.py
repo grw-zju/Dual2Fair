@@ -22,7 +22,7 @@ def raw_file_path(name):
     return os.path.join(DATA_DIR, name, DATASET_FILES[name])
 
 
-def audit(name):
+def check_dataset(name):
     path = raw_file_path(name)
     if not os.path.exists(path):
         return {
@@ -31,7 +31,7 @@ def audit(name):
             'observed': None,
             'expected_statistics': EXPECTED[name],
             'matches': False,
-            'status': 'missing raw data; preprocessing audit not run',
+            'status': 'missing raw data; check not run',
         }
     sys.path.insert(0, ROOT)
     from data.dataset_utils import load_dataset
@@ -48,4 +48,4 @@ def audit(name):
 
 
 if __name__ == '__main__':
-    print(json.dumps([audit(name) for name in EXPECTED], indent=2))
+    print(json.dumps([check_dataset(name) for name in EXPECTED], indent=2))

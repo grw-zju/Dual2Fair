@@ -1,6 +1,6 @@
 import numpy as np
 
-from scripts.run_five_seeds import aggregate_runs
+from scripts.run_multi_seed import aggregate_runs
 
 
 def uif_from_means(runs):

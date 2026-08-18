@@ -11,9 +11,9 @@ import numpy as np
 SEEDS = [42, 43, 44, 45, 46]
 
 
-def aggregate_runs(runs):
-    if len(runs) != 5 or len({run['model_seed'] for run in runs}) != 5:
-        raise ValueError('Aggregation requires five distinct model seeds')
+def aggregate_runs(runs, required_five=True):
+    if required_five and (len(runs) != 5 or len({run['model_seed'] for run in runs}) != 5):
+        raise ValueError('Reported aggregation requires five distinct model seeds')
     invariants = ('split_hash', 'dataset', 'backbone', 'method', 'eval_mode')
     for key in invariants:
         if len({str(run.get(key)) for run in runs}) != 1:
@@ -39,8 +39,8 @@ def aggregate_runs(runs):
         # Do not recompute UIF by plugging mean NDCG/DUF/DIF into the UIF formula.
         aggregate[metric] = {
             'mean': float(values.mean()),
-            'std': float(values.std(ddof=1)),
-            'ci95': float(1.96 * values.std(ddof=1) / math.sqrt(5))}
+            'std': float(values.std(ddof=1)) if len(values) > 1 else 0.0,
+            'ci95': float(1.96 * values.std(ddof=1) / math.sqrt(len(values))) if len(values) > 1 else 0.0}
     return aggregate
 
 
@@ -49,7 +49,8 @@ def main():
     parser.add_argument('--dataset', required=True)
     parser.add_argument('--backbone', required=True)
     parser.add_argument('--method', required=True)
-    parser.add_argument('--config', default='config/default.yaml')
+    parser.add_argument('--config', default='configs/default.yaml')
+    parser.add_argument('--seeds', nargs='+', type=int, default=SEEDS)
     parser.add_argument('--uif-reference-file')
     parser.add_argument('--allow-missing-uif-reference', action='store_true')
     parser.add_argument('--evaluation-stage', default='both', choices=['validation', 'test', 'both'])
@@ -62,30 +63,27 @@ def main():
     directory = os.path.join(args.output_root, args.dataset, args.backbone, args.method)
     os.makedirs(directory, exist_ok=True)
     runs = []
-    for seed in SEEDS:
-        suffix = f'_seed_{seed}'
+    for seed in args.seeds:
         command = [sys.executable, 'run.py', '--dataset', args.dataset,
                    '--backbone', args.backbone, '--method', args.method,
                    '--config', args.config, '--seed', str(seed),
                    '--split-seed', str(args.split_seed), '--eval_mode', 'full',
                    '--evaluation-stage', args.evaluation_stage,
-                   '--gpu', str(args.gpu), '--results_dir', directory,
-                   '--save_dir', os.path.join(directory, 'checkpoints'),
-                   '--output-suffix', suffix]
+                   '--gpu', str(args.gpu), '--results_dir', args.output_root,
+                   '--save_dir', 'checkpoints']
         if args.uif_reference_file:
             command.extend(['--uif-reference-file', args.uif_reference_file])
         if args.allow_missing_uif_reference:
             command.append('--allow-missing-uif-reference')
         subprocess.run(command, check=True)
-        path = os.path.join(directory,
-                            f'{args.dataset}_{args.backbone}_{args.method}{suffix}.json')
+        path = os.path.join(directory, f'seed_{seed}.json')
         with open(path) as handle:
             run = json.load(handle)
         destination = os.path.join(directory, f'seed_{seed}.json')
         with open(destination, 'w') as handle:
             json.dump(run, handle, indent=2)
         runs.append(run)
-    aggregate = aggregate_runs(runs)
+    aggregate = aggregate_runs(runs, required_five=(args.seeds == SEEDS))
     with open(os.path.join(directory, 'aggregate.json'), 'w') as handle:
         json.dump(aggregate, handle, indent=2)
 

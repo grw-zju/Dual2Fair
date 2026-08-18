@@ -16,7 +16,7 @@ def gradient_norm(loss, tensor):
     return 0.0 if gradient is None else float(gradient.norm())
 
 
-def analyze(config_path='config/default.yaml', strategy='Dual2Fair'):
+def analyze(config_path='configs/default.yaml', strategy='Dual2Fair'):
     config = load_config(config_path)
     dataset = load_dataset('demo', min_ui=3, min_ii=1)
     backbone = init_backbone('lightgcn', dataset, config, torch.device('cpu'))

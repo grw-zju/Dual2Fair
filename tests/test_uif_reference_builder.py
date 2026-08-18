@@ -1,6 +1,6 @@
 import json
 
-from scripts.build_uif_references import validate_and_build
+from scripts.build_uif_reference import validate_and_build
 
 
 def write_run(tmp_path, seed, val_duf, val_dif, test_duf, test_dif):

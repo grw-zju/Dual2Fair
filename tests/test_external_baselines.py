@@ -5,8 +5,8 @@ import sys
 import pytest
 import torch
 
-from baseline import BASELINES, CATEGORIES, PROCESSING_TYPES
-from baseline.external_official import ESAM, MGL, PROVENANCE
+from baselines import BASELINES, CATEGORIES, PROCESSING_TYPES
+from baselines.external_official import ESAM, MGL, PROVENANCE
 from data.dataset_utils import load_dataset
 from evaluation.evaluator import Evaluator
 from run import load_config

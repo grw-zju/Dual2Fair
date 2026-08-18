@@ -28,7 +28,7 @@ def tiny_config(mode):
 
 
 @pytest.mark.parametrize('mode', ['ot', 'hard', 'mmd'])
-def test_alignment_modes_complete_lightgcn_smoke(mode):
+def test_alignment_modes_complete_lightgcn_demo(mode):
     dataset = load_dataset('demo', min_ui=3, min_ii=1)
     settings = tiny_config(mode)
     backbone = init_backbone('lightgcn', dataset, settings, torch.device('cpu'))

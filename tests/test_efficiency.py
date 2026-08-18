@@ -1,6 +1,6 @@
 import pytest
 
-from scripts.benchmark_efficiency import benchmark
+from scripts.run_efficiency import benchmark
 
 
 def test_standard_and_lowrank_benchmarks_run_on_demo():
@@ -12,7 +12,7 @@ def test_standard_and_lowrank_benchmarks_run_on_demo():
         assert result['time_per_epoch_seconds'] >= 0
         assert result['peak_memory_bytes'] > 0
         assert result['inference_seconds_per_user'] >= 0
-        assert 'Demo/smoke-test mode' in result['note']
+        assert result['dataset'] == 'demo'
 
 
 def test_dense_benchmark_runs_on_demo_if_safe():
