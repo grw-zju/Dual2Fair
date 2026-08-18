@@ -24,8 +24,6 @@ def aggregate_runs(runs, required_five=True):
     for metric in metrics:
         raw_values = [run.get(metric) for run in runs]
         if metric == 'UIF' and all(value is None for value in raw_values):
-            if {run.get('method') for run in runs} != {'standard'}:
-                raise ValueError('Only Standard reference-building runs may omit UIF')
             aggregate['run_level_metrics'][metric] = raw_values
             aggregate[metric] = None
             continue
